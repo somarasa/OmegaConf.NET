@@ -94,8 +94,9 @@ public class YamlFormatParser : IConfigFormatParser
     private ConfigValueNode ConvertScalar(YamlScalarNode scalar, SourceInfo source, ConfigOperator op)
     {
         string? raw = scalar.Value;
+        bool isQuoted = scalar.Style is ScalarStyle.SingleQuoted or ScalarStyle.DoubleQuoted;
 
-        if (raw == null || raw == "null" || raw == "~")
+        if (!isQuoted && (raw == null || raw == "null" || raw == "~"))
         {
             return new ConfigValueNode(null, op, source);
         }
@@ -103,6 +104,11 @@ public class YamlFormatParser : IConfigFormatParser
         if (raw == ConfigValueNode.MissingMarker)
         {
             return new ConfigValueNode(ConfigValueNode.MissingMarker, op, source);
+        }
+
+        if (isQuoted)
+        {
+            return new ConfigValueNode(raw ?? "", op, source);
         }
 
         // Try boolean
@@ -118,7 +124,8 @@ public class YamlFormatParser : IConfigFormatParser
         }
 
         // Try float / double (only if has decimal point or exponential to avoid false positives)
-        if (raw.Contains('.') && double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out double doubleVal))
+        if ((raw!.Contains('.') || raw.Contains('e', StringComparison.OrdinalIgnoreCase)) &&
+            double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out double doubleVal))
         {
             return new ConfigValueNode(doubleVal, op, source);
         }

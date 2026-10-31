@@ -71,7 +71,7 @@ public class OmegaConfBuilder
     {
         // 1. Extract group selections and ~group from CLI args
         var remainingCliOverrides = new List<string>();
-        CliOverrideParser.ExtractGroupSelections(_cliArgs, _selectedPaths, _droppedGroups, remainingCliOverrides);
+        CliOverrideParser.ExtractGroupSelections(_cliArgs, _selectedPaths, _droppedGroups, remainingCliOverrides, _rootDir);
 
         // 2. Resolve tree composition with defaults and cascading
         var resolver = new TreeResolver(_registry);
@@ -144,6 +144,8 @@ public class OmegaConfBuilder
 public class OmegaConfBuilder<T>
 {
     private readonly OmegaConfBuilder _inner = new();
+
+    public OmegaConfBuilder InnerBuilder => _inner;
 
     public OmegaConfBuilder<T> SetRootDirectory(string rootDir)
     {

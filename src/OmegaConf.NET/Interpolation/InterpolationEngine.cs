@@ -82,14 +82,11 @@ public class InterpolationEngine : IInterpolationContext
 
         try
         {
-            // Case 1: Exact match - the whole string is a single interpolation "${path.to.val}"
+            // Case 1: Exact match - the whole string is a single interpolation "${...}" (potentially with nested "${...}" inside)
             // Preserves the native type (returns int, bool, double, etc. rather than string)
-            var match = InterpolationRegex.Match(raw);
-            if (match.Success && match.Index == 0 && match.Length == raw.Length)
+            if (IsSingleOuterInterpolation(raw, out string outerInner))
             {
-                string inner = match.Groups[1].Value.Trim();
-                var resolved = ResolveExpression(inner, currentPath, source);
-                return resolved;
+                return ResolveExpression(outerInner, currentPath, source);
             }
 
             // Case 2: Embedded interpolation(s) or escaped interpolations
@@ -124,8 +121,72 @@ public class InterpolationEngine : IInterpolationContext
         }
     }
 
+    private static bool IsSingleOuterInterpolation(string raw, out string inner)
+    {
+        inner = "";
+        if (string.IsNullOrEmpty(raw) || !raw.StartsWith("${", StringComparison.Ordinal) || !raw.EndsWith('}'))
+        {
+            return false;
+        }
+
+        int depth = 0;
+        for (int i = 0; i < raw.Length; i++)
+        {
+            if (raw[i] == '\\' && i + 2 < raw.Length && raw[i + 1] == '$' && raw[i + 2] == '{')
+            {
+                i += 2; // skip escaped \${
+                continue;
+            }
+
+            if (raw[i] == '$' && i + 1 < raw.Length && raw[i + 1] == '{')
+            {
+                depth++;
+                i++; // skip '{'
+                continue;
+            }
+
+            if (raw[i] == '{')
+            {
+                depth++;
+            }
+            else if (raw[i] == '}')
+            {
+                depth--;
+                if (depth == 0 && i < raw.Length - 1)
+                {
+                    // Closed before the end of the string (e.g. "${a}...${b}")
+                    return false;
+                }
+            }
+        }
+
+        if (depth == 0)
+        {
+            inner = raw[2..^1].Trim();
+            return true;
+        }
+
+        return false;
+    }
+
     private object? ResolveExpression(string expr, string currentPath, SourceInfo source)
     {
+        // Resolve any inner nested interpolations first (e.g. "eval: ${batch_size} * ${num_gpus}")
+        if (expr.Contains("${"))
+        {
+            int maxIterations = 25;
+            int iteration = 0;
+            while (InterpolationRegex.IsMatch(expr) && iteration++ < maxIterations)
+            {
+                expr = InterpolationRegex.Replace(expr, m =>
+                {
+                    string inner = m.Groups[1].Value.Trim();
+                    var resolved = ResolveExpression(inner, currentPath, source);
+                    return resolved?.ToString() ?? "";
+                });
+            }
+        }
+
         // 1. Check if it's a resolver: e.g. "env:PORT" or "eval: 10 * 20"
         int colonIdx = expr.IndexOf(':');
         if (colonIdx > 0)
@@ -134,11 +195,6 @@ public class InterpolationEngine : IInterpolationContext
             if (_resolvers.TryGetValue(potentialPrefix, out var resolver))
             {
                 string arg = expr[(colonIdx + 1)..].Trim();
-                // Resolve any nested interpolations inside the argument first
-                if (arg.Contains("${"))
-                {
-                    arg = ResolveStringValue(arg, currentPath, source)?.ToString() ?? "";
-                }
                 return resolver.Resolve(arg, this);
             }
         }
@@ -261,7 +317,57 @@ public class InterpolationEngine : IInterpolationContext
 
         foreach (var part in parts)
         {
-            if (current is ConfigObjectNode obj && obj.TryGetChild(part, out var next))
+            // Check for list index syntax: e.g. "endpoints[0]" or "matrix[1][2]"
+            int bracketIdx = part.IndexOf('[');
+            if (bracketIdx >= 0 && part.EndsWith(']'))
+            {
+                string propName = part[..bracketIdx];
+                if (!string.IsNullOrEmpty(propName))
+                {
+                    if (current is ConfigObjectNode obj && obj.TryGetChild(propName, out var listCandidate))
+                    {
+                        current = listCandidate!;
+                    }
+                    else
+                    {
+                        return null;
+                    }
+                }
+
+                // Parse one or more [index] segments
+                string indicesPart = part[bracketIdx..];
+                while (indicesPart.StartsWith('['))
+                {
+                    int closeIdx = indicesPart.IndexOf(']');
+                    if (closeIdx < 0) return null;
+
+                    string idxStr = indicesPart[1..closeIdx].Trim();
+                    if (!int.TryParse(idxStr, out int index)) return null;
+
+                    if (current is ConfigListNode listNode && index >= 0 && index < listNode.Items.Count)
+                    {
+                        current = listNode.Items[index];
+                    }
+                    else
+                    {
+                        return null;
+                    }
+
+                    indicesPart = indicesPart[(closeIdx + 1)..];
+                }
+            }
+            else if (current is ConfigListNode directList && int.TryParse(part, out int directIdx))
+            {
+                if (directIdx >= 0 && directIdx < directList.Items.Count)
+                {
+                    current = directList.Items[directIdx];
+                }
+                else
+                {
+                    return null;
+                }
+            }
+            else if (current is ConfigObjectNode obj && obj.TryGetChild(part, out var next))
             {
                 current = next!;
             }

@@ -87,12 +87,13 @@ c#omegaconf/
 - **Precedence with `_self_`**:
   - `_self_` at the end: Local file overrides defaults.
   - `_self_` at the start: Defaults override local file.
-- **Auto-Cascading**: If a sub-config shares a filename with its parent folder (e.g. `db/staging/postgres.yaml` and `db/postgres.yaml`), the parent base is loaded automatically first.
-- **Explicit Inheritance**: `_inherits_: "../base.yaml"` or lists of files.
+- **Auto-Cascading**: If a sub-config shares a filename with its parent folder(s) across one or multiple directory levels (e.g. `db/cloud/aws/postgres.yaml`, `db/cloud/postgres.yaml`, and `db/postgres.yaml`), parent bases are loaded and merged automatically from root to leaf.
+- **Explicit Inheritance**: `_inherits_: "../base.yaml"` or lists of files (including cross-format inheritance across YAML, JSON/JSONC, and TOML).
 - **Cycle Prevention**: Circular dependencies throw `ConfigInheritanceException`.
 
 ### Variable Interpolation (`src/OmegaConf.NET/Interpolation/`)
 - **Native Type Preservation**: Pure single-variable interpolations `${port}` preserve `int`/`bool` types.
+- **List Element Indexing**: Supports both bracket (`${servers[0]}`) and dot (`${servers.0}`) indexing.
 - **Relative Dot Navigation**:
   - `.sibling`: Resolves in the same enclosing object container.
   - `..parent`: Resolves one container level up.
@@ -100,12 +101,12 @@ c#omegaconf/
 - **Resolvers**:
   - `${env:VAR, fallback}`: Environment variables.
   - `${eval: 10 * 20}`: Built-in math, logic, comparison, and parentheses evaluator.
-  - Custom resolvers registered via `builder.RegisterResolver(...)`.
+  - Custom resolvers registered via `builder.RegisterResolver(...)` (including nested interpolations like `${slugify:${app_name}}`).
 - **Cycle Prevention**: Circular references throw `ConfigInterpolationException`.
 
 ### Structured Configs & Binding (`src/OmegaConf.NET/Binding/`)
-- **Name Resolution**: Automatic mapping between C# `PascalCase` and config `snake_case`, `kebab-case`, `camelCase`, or exact names.
-- **Type Support**: Primitives, enums (case-insensitive), `TimeSpan`, `Guid`, `Nullable<T>`, arrays (`T[]`), `List<T>`, `Dictionary<string, T>`, and nested POCOs/records.
+- **Name Resolution**: Automatic mapping between C# `PascalCase` (including acronym handling such as `SSLPort` -> `ssl_port`) and config `snake_case`, `kebab-case`, `camelCase`, or exact names.
+- **Type Support**: Primitives, enums (case-insensitive), `TimeSpan`, `DateTime`, `DateTimeOffset`, `DateOnly`, `TimeOnly`, `Guid`, `Uri`, `Nullable<T>`, arrays (`T[]`), `List<T>`, `Dictionary<string, T>`, `IReadOnlyDictionary<string, T>`, and nested POCOs or positional `record` primary constructors.
 - **Attributes**:
   - `[ConfigRequired]`: Throws `MissingRequiredConfigException` if property is absent or `???`.
   - `[ConfigKey("custom")]`: Custom key alias.
@@ -114,18 +115,21 @@ c#omegaconf/
 
 ---
 
-## 4. Multi-Run & Tooling (`MultiRun/`, `Diff/`, `Schema/`)
+## 4. Multi-Run, Serialization & Tooling (`MultiRun/`, `Diff/`, `Schema/`, `Serialization/`)
 
 1. **Multi-Run / Sweeps (`SweepEngine`)**:
    - Detects `-m` or `--multirun` in CLI args.
-   - Computes Cartesian product of comma-separated arguments (e.g. `db=stage,prod workers=2,4`).
+   - Computes Cartesian product of comma-separated arguments (e.g. `db=stage,prod workers=2,4`) while preserving bracketed list literals (`tags=[a,b,c]`).
    - Generates all permutations via `.BuildSweeps<T>()` and `.BuildSweepNodes()`.
 
 2. **Config Differ (`ConfigDiffer`)**:
    - Hierarchically compares two nodes and reports additions (`+`), removals (`-`), and modifications (`~`).
 
 3. **JSON Schema Generator (`JsonSchemaGenerator`)**:
-   - Generates Draft-07 JSON schemas for IDE auto-complete.
+   - Generates Draft-07 JSON schemas for IDE auto-complete (supporting both POCOs and positional `record` constructors).
+
+4. **Serialization (`ConfigSerializer`)**:
+   - Exports any `ConfigNode` to YAML (`.ToYaml()`), JSON (`.ToJson()`), or TOML (`.ToToml()`).
 
 ---
 

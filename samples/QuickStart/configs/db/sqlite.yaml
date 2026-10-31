@@ -1,0 +1,6 @@
+driver: sqlite
+host: ":memory:"
+port: 0
+max_connections: 1
+ssl: false
+timeout_seconds: 5

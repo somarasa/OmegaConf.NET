@@ -56,7 +56,9 @@ public static class ConfigBinder
 
         // Handle Primitives and Enums
         if (targetType.IsPrimitive || targetType.IsEnum || targetType == typeof(decimal) ||
-            targetType == typeof(DateTime) || targetType == typeof(TimeSpan) || targetType == typeof(Guid))
+            targetType == typeof(DateTime) || targetType == typeof(DateTimeOffset) ||
+            targetType == typeof(DateOnly) || targetType == typeof(TimeOnly) ||
+            targetType == typeof(TimeSpan) || targetType == typeof(Guid) || targetType == typeof(Uri))
         {
             return BindScalar(node, targetType, currentPath);
         }
@@ -123,6 +125,26 @@ public static class ConfigBinder
                 return Guid.Parse(sGuid);
             }
 
+            if (targetType == typeof(DateTimeOffset) && val is string sDto)
+            {
+                return DateTimeOffset.Parse(sDto, CultureInfo.InvariantCulture);
+            }
+
+            if (targetType == typeof(DateOnly) && val is string sDate)
+            {
+                return DateOnly.Parse(sDate, CultureInfo.InvariantCulture);
+            }
+
+            if (targetType == typeof(TimeOnly) && val is string sTimeOnly)
+            {
+                return TimeOnly.Parse(sTimeOnly, CultureInfo.InvariantCulture);
+            }
+
+            if (targetType == typeof(Uri) && val is string sUri)
+            {
+                return new Uri(sUri, UriKind.RelativeOrAbsolute);
+            }
+
             return Convert.ChangeType(val, targetType, CultureInfo.InvariantCulture);
         }
         catch (Exception ex)
@@ -149,26 +171,24 @@ public static class ConfigBinder
             }
         }
 
-        object instance;
-        try
-        {
-            instance = Activator.CreateInstance(concreteType)
-                ?? throw new InvalidOperationException($"Could not instantiate type '{concreteType.FullName}'.");
-        }
-        catch (Exception ex)
-        {
-            throw new InvalidOperationException($"Failed to create instance of type '{concreteType.FullName}': {ex.Message}", ex);
-        }
+        var boundParameterNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        object instance = CreateInstanceOrRecord(concreteType, objNode, currentPath, boundParameterNames);
 
         var properties = concreteType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
                                      .Where(p => p.CanWrite && p.GetCustomAttribute<ConfigIgnoreAttribute>() == null);
 
         foreach (var prop in properties)
         {
+            if (boundParameterNames.Contains(prop.Name))
+            {
+                continue;
+            }
+
             string propPath = string.IsNullOrEmpty(currentPath) ? prop.Name : $"{currentPath}.{prop.Name}";
             bool isRequired = prop.GetCustomAttribute<ConfigRequiredAttribute>() != null;
 
-            ConfigNode? childNode = FindMatchingChild(objNode, prop);
+            var explicitKey = prop.GetCustomAttribute<ConfigKeyAttribute>()?.Key;
+            ConfigNode? childNode = FindMatchingChild(objNode, prop.Name, explicitKey);
 
             if (childNode != null)
             {
@@ -196,37 +216,114 @@ public static class ConfigBinder
         return instance;
     }
 
-    private static ConfigNode? FindMatchingChild(ConfigObjectNode objNode, PropertyInfo prop)
+    private static object CreateInstanceOrRecord(
+        Type concreteType,
+        ConfigObjectNode objNode,
+        string currentPath,
+        HashSet<string> boundParameterNames)
+    {
+        var constructors = concreteType.GetConstructors(BindingFlags.Public | BindingFlags.Instance);
+        var defaultCtor = constructors.FirstOrDefault(c => c.GetParameters().Length == 0);
+        if (defaultCtor != null)
+        {
+            try
+            {
+                return Activator.CreateInstance(concreteType)
+                    ?? throw new InvalidOperationException($"Could not instantiate type '{concreteType.FullName}'.");
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException($"Failed to create instance of type '{concreteType.FullName}': {ex.Message}", ex);
+            }
+        }
+
+        // Support positional records / primary constructors
+        var primaryCtor = constructors.OrderByDescending(c => c.GetParameters().Length).FirstOrDefault();
+        if (primaryCtor == null)
+        {
+            throw new InvalidOperationException($"No public constructor found for type '{concreteType.FullName}'.");
+        }
+
+        var parameters = primaryCtor.GetParameters();
+        var args = new object?[parameters.Length];
+
+        for (int i = 0; i < parameters.Length; i++)
+        {
+            var param = parameters[i];
+            string paramName = param.Name ?? $"arg{i}";
+            string paramPath = string.IsNullOrEmpty(currentPath) ? paramName : $"{currentPath}.{paramName}";
+
+            var matchingProp = concreteType.GetProperty(paramName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+            var explicitKey = param.GetCustomAttribute<ConfigKeyAttribute>()?.Key
+                              ?? matchingProp?.GetCustomAttribute<ConfigKeyAttribute>()?.Key;
+            bool isRequired = param.GetCustomAttribute<ConfigRequiredAttribute>() != null
+                              || matchingProp?.GetCustomAttribute<ConfigRequiredAttribute>() != null;
+
+            ConfigNode? childNode = FindMatchingChild(objNode, paramName, explicitKey);
+
+            if (childNode != null)
+            {
+                if (childNode is ConfigValueNode cvn && cvn.IsMissingMarker)
+                {
+                    if (isRequired)
+                    {
+                        throw new MissingRequiredConfigException(paramPath, concreteType, cvn.Source);
+                    }
+                    throw new MissingValueMarkerException(paramPath, cvn.Source);
+                }
+
+                args[i] = Bind(childNode, param.ParameterType, paramPath);
+                boundParameterNames.Add(paramName);
+            }
+            else if (isRequired)
+            {
+                throw new MissingRequiredConfigException(paramPath, concreteType, objNode.Source);
+            }
+            else if (param.HasDefaultValue)
+            {
+                args[i] = param.DefaultValue;
+                boundParameterNames.Add(paramName);
+            }
+            else
+            {
+                args[i] = param.ParameterType.IsValueType ? Activator.CreateInstance(param.ParameterType) : null;
+                boundParameterNames.Add(paramName);
+            }
+        }
+
+        return primaryCtor.Invoke(args);
+    }
+
+    private static ConfigNode? FindMatchingChild(ConfigObjectNode objNode, string memberName, string? explicitKey = null)
     {
         // 1. Explicit ConfigKeyAttribute
-        var explicitKey = prop.GetCustomAttribute<ConfigKeyAttribute>()?.Key;
         if (!string.IsNullOrEmpty(explicitKey))
         {
             return objNode.GetChild(explicitKey);
         }
 
         // 2. Direct property name
-        if (objNode.TryGetChild(prop.Name, out var exact))
+        if (objNode.TryGetChild(memberName, out var exact))
         {
             return exact;
         }
 
-        // 3. snake_case (e.g. AppName -> app_name, TimeoutSeconds -> timeout_seconds)
-        string snake = ToSnakeCase(prop.Name);
+        // 3. snake_case (e.g. AppName -> app_name, SSLPort -> ssl_port)
+        string snake = ToSnakeCase(memberName);
         if (objNode.TryGetChild(snake, out var snakeNode))
         {
             return snakeNode;
         }
 
         // 4. kebab-case (e.g. AppName -> app-name)
-        string kebab = ToKebabCase(prop.Name);
+        string kebab = ToKebabCase(memberName);
         if (objNode.TryGetChild(kebab, out var kebabNode))
         {
             return kebabNode;
         }
 
         // 5. camelCase (e.g. AppName -> appName)
-        string camel = char.ToLowerInvariant(prop.Name[0]) + prop.Name[1..];
+        string camel = char.ToLowerInvariant(memberName[0]) + memberName[1..];
         if (objNode.TryGetChild(camel, out var camelNode))
         {
             return camelNode;
@@ -235,7 +332,7 @@ public static class ConfigBinder
         return null;
     }
 
-    private static string ToSnakeCase(string str)
+    public static string ToSnakeCase(string str)
     {
         if (string.IsNullOrEmpty(str)) return str;
         var sb = new System.Text.StringBuilder();
@@ -246,7 +343,12 @@ public static class ConfigBinder
             {
                 if (i > 0 && str[i - 1] != '_')
                 {
-                    sb.Append('_');
+                    bool prevIsLowerOrDigit = char.IsLower(str[i - 1]) || char.IsDigit(str[i - 1]);
+                    bool nextIsLower = i + 1 < str.Length && char.IsLower(str[i + 1]);
+                    if (prevIsLowerOrDigit || nextIsLower)
+                    {
+                        sb.Append('_');
+                    }
                 }
                 sb.Append(char.ToLowerInvariant(c));
             }

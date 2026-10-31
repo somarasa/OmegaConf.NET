@@ -40,3 +40,11 @@ msbuild.log
 # OS generated
 .DS_Store
 Thumbs.db
+
+# NuGet Packages
+*.nupkg
+*.snupkg
+nupkgs/
+
+# Generated sample schema
+samples/QuickStart/configs/config.schema.json

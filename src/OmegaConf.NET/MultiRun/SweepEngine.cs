@@ -41,17 +41,20 @@ public static class SweepEngine
         foreach (var arg in cleanArgs)
         {
             int eqIdx = arg.IndexOf('=');
-            // If in multi-run mode and argument has comma-separated values (e.g. workers=2,4 or db=stage,prod)
             if (isMultiRunMode && eqIdx > 0 && arg.Contains(','))
             {
                 string key = arg[..eqIdx].Trim();
                 string rawValues = arg[(eqIdx + 1)..].Trim();
 
-                var values = rawValues.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
-                if (values.Count > 1)
+                // Do not split bracketed list literals like tags=[a,b,c]
+                if (!(rawValues.StartsWith('[') && rawValues.EndsWith(']')))
                 {
-                    sweepMatrix[key] = values;
-                    continue;
+                    var values = SplitTopLevelCommas(rawValues);
+                    if (values.Count > 1)
+                    {
+                        sweepMatrix[key] = values;
+                        continue;
+                    }
                 }
             }
 
@@ -59,6 +62,31 @@ public static class SweepEngine
         }
 
         return (nonSweepArgs, sweepMatrix);
+    }
+
+    private static List<string> SplitTopLevelCommas(string input)
+    {
+        var result = new List<string>();
+        int depth = 0;
+        int lastStart = 0;
+
+        for (int i = 0; i < input.Length; i++)
+        {
+            char c = input[i];
+            if (c is '[' or '(' or '{') depth++;
+            else if (c is ']' or ')' or '}') depth--;
+            else if (c == ',' && depth == 0)
+            {
+                string part = input[lastStart..i].Trim();
+                if (!string.IsNullOrEmpty(part)) result.Add(part);
+                lastStart = i + 1;
+            }
+        }
+
+        string tail = input[lastStart..].Trim();
+        if (!string.IsNullOrEmpty(tail)) result.Add(tail);
+
+        return result;
     }
 
     /// <summary>

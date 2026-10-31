@@ -4,52 +4,60 @@ using OmegaConf.NET.Diff;
 using OmegaConf.NET.Schema;
 using OmegaConf.NET.Serialization;
 
-Console.WriteLine("==================================================");
-Console.WriteLine("        OmegaConf.NET QuickStart Sample           ");
-Console.WriteLine("==================================================");
+namespace QuickStart;
 
-string configsDir = Path.Combine(AppContext.BaseDirectory, "configs");
+public static class Program
+{
+    public static void Main(string[] args)
+    {
+        Console.WriteLine("==================================================");
+        Console.WriteLine("        OmegaConf.NET QuickStart Sample           ");
+        Console.WriteLine("==================================================");
 
-// 1. Build staging configuration (default)
-Console.WriteLine("\n[1] Building Staging Configuration (Auto-Cascading)...");
-var stagingNode = OmegaConfBuilder.Create()
-    .SetRoot(configsDir)
-    .AddCliArgs(args)
-    .BuildNode();
+        string configsDir = Path.Combine(AppContext.BaseDirectory, "configs");
 
-Console.WriteLine("Composed Staging Config:\n" + stagingNode.ToYaml());
+        // 1. Build staging configuration (default)
+        Console.WriteLine("\n[1] Building Staging Configuration (Auto-Cascading)...");
+        var stagingNode = OmegaConfBuilder.Create()
+            .SetRoot(configsDir)
+            .AddCliArgs(args)
+            .BuildNode();
 
-// 2. Build production configuration
-Console.WriteLine("\n[2] Building Production Configuration (With *= and += Operators)...");
-var prodNode = OmegaConfBuilder.Create()
-    .SetRoot(configsDir)
-    .SelectPath("db", "production/postgres")
-    .BuildNode();
+        Console.WriteLine("Composed Staging Config:\n" + stagingNode.ToYaml());
 
-Console.WriteLine("Composed Production Config:\n" + prodNode.ToYaml());
+        // 2. Build production configuration
+        Console.WriteLine("\n[2] Building Production Configuration (With *= and += Operators)...");
+        var prodNode = OmegaConfBuilder.Create()
+            .SetRoot(configsDir)
+            .SelectPath("db", "production/postgres")
+            .BuildNode();
 
-// 3. Compare Staging vs Production using ConfigDiffer
-Console.WriteLine("\n[3] Difference between Staging and Production:");
-var diff = ConfigDiffer.Compare(stagingNode, prodNode);
-Console.WriteLine(diff.ToString());
+        Console.WriteLine("Composed Production Config:\n" + prodNode.ToYaml());
 
-// 4. Strongly Typed POCO Binding
-Console.WriteLine("\n[4] Binding to Strongly Typed C# Class:");
-var config = OmegaConfBuilder.Create<ServiceConfig>()
-    .SetRoot(configsDir)
-    .AddCliArgs(args)
-    .Build();
+        // 3. Compare Staging vs Production using ConfigDiffer
+        Console.WriteLine("\n[3] Difference between Staging and Production:");
+        var diff = ConfigDiffer.Compare(stagingNode, prodNode);
+        Console.WriteLine(diff.ToString());
 
-Console.WriteLine($"Service Name: {config.AppName}");
-Console.WriteLine($"DB Host: {config.Db?.Host}, Port: {config.Db?.Port}, Max Connections: {config.Db?.MaxConnections}");
+        // 4. Strongly Typed POCO Binding
+        Console.WriteLine("\n[4] Binding to Strongly Typed C# Class:");
+        var config = OmegaConfBuilder.Create<ServiceConfig>()
+            .SetRoot(configsDir)
+            .AddCliArgs(args)
+            .Build();
 
-// 5. Generate JSON Schema for VS Code / Rider Auto-Complete
-Console.WriteLine("\n[5] Generating JSON Schema for IDE Auto-Complete...");
-string schemaPath = Path.Combine(configsDir, "config.schema.json");
-JsonSchemaGenerator.GenerateSchemaFile<ServiceConfig>(schemaPath);
-Console.WriteLine($"Schema written to: {schemaPath}");
+        Console.WriteLine($"Service Name: {config.AppName}");
+        Console.WriteLine($"DB Host: {config.Db?.Host}, Port: {config.Db?.Port}, Max Connections: {config.Db?.MaxConnections}");
 
-Console.WriteLine("\nSample executed successfully!");
+        // 5. Generate JSON Schema for VS Code / Rider Auto-Complete
+        Console.WriteLine("\n[5] Generating JSON Schema for IDE Auto-Complete...");
+        string schemaPath = Path.Combine(configsDir, "config.schema.json");
+        JsonSchemaGenerator.GenerateSchemaFile<ServiceConfig>(schemaPath);
+        Console.WriteLine($"Schema written to: {schemaPath}");
+
+        Console.WriteLine("\nSample executed successfully!");
+    }
+}
 
 public class DatabaseOptions
 {

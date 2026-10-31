@@ -18,18 +18,12 @@ public static class OmegaConfigurationExtensions
     /// Binds an OmegaConf composed configuration to a strongly typed options instance in the dependency injection container.
     /// </summary>
     public static IServiceCollection ConfigureOmegaConf<T>(this IServiceCollection services, Action<OmegaConfBuilder> configure)
-        where T : class, new()
+        where T : class
     {
         var builder = OmegaConfBuilder.Create<T>();
-        configure(builder.GetInnerBuilder());
+        configure(builder.InnerBuilder);
         var instance = builder.Build();
         services.AddSingleton(instance);
         return services;
-    }
-
-    private static OmegaConfBuilder GetInnerBuilder<T>(this OmegaConfBuilder<T> genericBuilder)
-    {
-        var field = typeof(OmegaConfBuilder<T>).GetField("_inner", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        return (OmegaConfBuilder)field!.GetValue(genericBuilder)!;
     }
 }

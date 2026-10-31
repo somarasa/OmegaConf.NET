@@ -77,8 +77,8 @@ OmegaConf.NET uses **key suffixes** to define mutation operators in YAML, JSON, 
 | `=` | `key=:` | Any | Direct assignment / replace |
 | `+=` | `key+=:` | Numbers, Strings, Lists, Objects | Numeric add, string concat, append list items, merge object |
 | `-=` | `key-=:` | Numbers, Lists | Numeric subtraction, remove matching list items |
-| `*=` | `key*=` | Numbers, Strings | Numeric multiplication, string repetition (`"ha"*=: 3` -> `"hahaha"`) |
-| `/=` | `key/=` | Numbers | Numeric division |
+| `*=` | `key*=:` | Numbers, Strings | Numeric multiplication, string repetition (`"ha"*=: 3` -> `"hahaha"`) |
+| `/=` | `key/=:` | Numbers | Numeric division |
 | `&=` | `key&=:` | Booleans, Integers | Logical AND, Bitwise AND |
 | `|=` | `key|=:` | Booleans, Integers | Logical OR, Bitwise OR |
 | `!=` | `key!=:` | Booleans | Logical toggle / invert current boolean value |
@@ -100,6 +100,7 @@ strict_mode&=: false          # Logical AND
 
 ### Interpolation Syntax
 - **Absolute Reference**: `${server.port}` or `${db.postgres.host}`.
+- **List Indexing**: `${servers[0]}` or `${servers.0}`.
 - **Native Type Preservation**: When a string is solely `${server.port}`, OmegaConf.NET preserves the native `int` type (rather than converting to `"8080"`).
 - **Embedded Strings**: `"http://${server.host}:${server.port}/api"`.
 - **Default Fallback**: `${cache.ttl:300}` (uses `300` if `cache.ttl` is not found).
@@ -152,8 +153,8 @@ api_key: ???
 
 ## 4. Structured C# Configs (POCOs & Records)
 
-OmegaConf.NET maps configurations into strongly typed C# classes with automatic casing conversion:
-- C# `PascalCase` properties automatically match YAML `snake_case`, `kebab-case`, `camelCase`, or exact names.
+OmegaConf.NET maps configurations into strongly typed C# classes and positional `record` types with automatic casing conversion:
+- C# `PascalCase` properties and constructor parameters automatically match YAML `snake_case` (including acronyms like `SSLPort` ↔ `ssl_port`), `kebab-case`, `camelCase`, or exact names.
 
 ```csharp
 using OmegaConf.NET.Attributes;
@@ -180,6 +181,12 @@ public class AppConfig
     [ConfigIgnore]
     public string RuntimeState { get; set; } = "";
 }
+
+// Positional records with primary constructors are also supported:
+public record ServiceRecordConfig(
+    [property: ConfigRequired] string AppName,
+    DatabaseConfig? Db,
+    [property: ConfigKey("active_workers")] int Workers = 4);
 ```
 
 ### Attributes
@@ -214,7 +221,7 @@ dotnet run -- db=production/postgres
 dotnet run -- ~db
 
 # Deep property overrides with operators
-dotnet run -- db.max_connections*=:2 db.timeout+=10 debug!=true
+dotnet run -- db.max_connections*=2 db.timeout+=10 tags+=[gpu,cluster] debug!=true
 ```
 
 ### ASP.NET Core & Microsoft.Extensions.Configuration
@@ -251,14 +258,19 @@ IReadOnlyList<AppConfig> configs = OmegaConfBuilder.Create<AppConfig>()
     .BuildSweeps();
 ```
 
-### Config Differ
-Compare two configuration layers and inspect changes:
+### Config Differ & Serialization
+Compare two configuration layers and inspect changes, or export nodes to YAML, JSON, or TOML:
 ```csharp
 using OmegaConf.NET.Diff;
+using OmegaConf.NET.Serialization;
 
 ConfigDiff diff = ConfigDiffer.Compare(baseNode, overrideNode);
 Console.WriteLine(diff.ToString());
 // Outputs: ~ key: old -> new, + key: val, - key: val
+
+string yaml = overrideNode.ToYaml();
+string json = overrideNode.ToJson(indented: true);
+string toml = overrideNode.ToToml();
 ```
 
 ### JSON Schema Generation for IDE Auto-Complete

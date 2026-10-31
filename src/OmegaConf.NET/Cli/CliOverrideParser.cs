@@ -14,7 +14,8 @@ public static class CliOverrideParser
         IEnumerable<string> args,
         IDictionary<string, string> selectedPaths,
         ISet<string> droppedGroups,
-        List<string> remainingValueOverrides)
+        List<string> remainingValueOverrides,
+        string? rootDir = null)
     {
         foreach (var arg in args)
         {
@@ -29,28 +30,26 @@ public static class CliOverrideParser
                 continue;
             }
 
-            // Path selection in Hydra: e.g. db=staging/postgres or model=fast
-            // Note: If value contains '/' it is explicitly a subfolder path selection
-            int eqIdx = trimmed.IndexOf('=');
-            if (eqIdx > 0 && !trimmed.Contains('.') && !trimmed.Contains("+=") && !trimmed.Contains("-=") && !trimmed.Contains("*=") && !trimmed.Contains("/=") && !trimmed.Contains("&=") && !trimmed.Contains("|=") && !trimmed.Contains("!="))
+            // Parse operator to see if this is a plain '=' assignment
+            var (path, op, val) = OperatorParser.ParseAssignment(trimmed);
+            if (op == ConfigOperator.Assign && !path.Contains('.'))
             {
-                string key = trimmed[..eqIdx].Trim();
-                string val = trimmed[(eqIdx + 1)..].Trim();
-
+                // Explicit subfolder path selection: e.g. db=staging/postgres
                 if (val.Contains('/') || val.Contains('\\'))
                 {
-                    selectedPaths[key] = val;
+                    selectedPaths[path] = val;
                     continue;
                 }
-            }
 
-            // Also allow group selection and value override simultaneously for top-level keys
-            if (eqIdx > 0 && !trimmed.Contains('.'))
-            {
-                string key = trimmed[..eqIdx].Trim();
-                string val = trimmed[(eqIdx + 1)..].Trim();
-                // If it's a plain '=' assignment, record as candidate group selection as well
-                selectedPaths[key] = val;
+                // If rootDir is provided and a matching config group folder exists, treat as a group selection
+                if (!string.IsNullOrEmpty(rootDir) && Directory.Exists(Path.Combine(rootDir, path)))
+                {
+                    selectedPaths[path] = val;
+                    continue;
+                }
+
+                // Otherwise record as candidate group selection AND keep as value override if not consumed as group
+                selectedPaths[path] = val;
             }
 
             remainingValueOverrides.Add(trimmed);
@@ -93,6 +92,11 @@ public static class CliOverrideParser
         string lastPart = parts[^1];
         if (current.TryGetChild(lastPart, out var existing))
         {
+            // Do not overwrite an already-composed config group object with a plain scalar CLI group name
+            if (parts.Length == 1 && existing is ConfigObjectNode && overrideNode is ConfigValueNode { Operator: ConfigOperator.Assign })
+            {
+                return;
+            }
             current.SetChild(lastPart, OperatorEngine.Apply(existing, overrideNode));
         }
         else

@@ -17,16 +17,18 @@ It bridges the gap in the .NET configuration ecosystem by bringing **tree-based 
   - Direct assignment: `=`
   - Arithmetic & append: `+=`, `-=`, `*=`, `/=`
   - Boolean logic & toggle: `&=`, `|=`, `!=`
-- 🧩 **Format Agnostic**: Built-in support for **YAML**, **TOML**, and **JSON / JSONC** (JSON with comments and trailing commas).
+- 🧩 **Format Agnostic**: Built-in support for **YAML**, **TOML**, and **JSON / JSONC** (JSON with comments and trailing commas), including cross-format composition and `.ToYaml()`, `.ToJson()`, and `.ToToml()` serialization.
 - 🔗 **Rich Variable Interpolation**:
   - `${path.to.key}` with **native type preservation** (numbers remain numbers, booleans remain booleans).
+  - List indexing support: `${servers[0]}` or `${servers.0}`.
+  - Relative & sibling dot navigation: `${.sibling}` and `${..parent}`.
   - Default fallback syntax: `${path.to.key:default_value}`.
-  - Built-in environment variable resolver: `${env:VAR_NAME, fallback}`.
-  - Extensible custom resolvers in C# (`${upper:...}`, `${now:...}`).
+  - Built-in math & logic evaluator (`${eval: 10 + 5 * 2}`) and environment variable resolver (`${env:VAR_NAME, fallback}`).
+  - Extensible custom resolvers in C# (`${slugify:${app_name}}`).
   - Circular dependency detection and cycle prevention.
 - ❓ **Mandatory Value Marker (`???`)**: Mark keys that must be supplied by lower layers or CLI overrides.
-- 💻 **CLI Overrides**: Seamlessly switch paths (`db=staging/postgres`), drop branches (`~db`), or mutate values (`threads+=2`, `debug!=true`) from `args[]`.
-- 🛡️ **Structured Configs & Strict Typing**: Bind to POCOs and records with automatic `PascalCase` ↔ `snake_case` mapping, `[ConfigRequired]`, `[ConfigKey]`, and `[ConfigIgnore]` attributes.
+- 💻 **CLI Overrides**: Seamlessly switch paths (`db=staging/postgres` or `db=postgres`), drop branches (`~db`), or mutate values (`threads+=2`, `tags+=[gpu]`, `debug!=true`) from `args[]`.
+- 🛡️ **Structured Configs & Strict Typing**: Bind to POCOs and positional `record` types with automatic `PascalCase` ↔ `snake_case` mapping (including acronym handling like `SSLPort` ↔ `ssl_port`), rich scalar types (`TimeSpan`, `DateTimeOffset`, `DateOnly`, `TimeOnly`, `Guid`, `Uri`), `[ConfigRequired]`, `[ConfigKey]`, and `[ConfigIgnore]` attributes.
 - 🔌 **Standard .NET Integration**: Native `IConfigurationSource` and `ConfigurationProvider` for ASP.NET Core and `Microsoft.Extensions.DependencyInjection`.
 
 ---
@@ -116,6 +118,12 @@ public class AppConfig
 
     public int ActiveWorkers { get; set; }
 }
+
+// Positional C# records are also supported out of the box:
+public record ServiceRecordConfig(
+    [property: ConfigRequired] string AppName,
+    DatabaseConfig? Db,
+    int ActiveWorkers = 4);
 ```
 
 ---
@@ -203,8 +211,18 @@ Output:
 ```text
 ~ db.host: "staging-db.internal" -> "prod-db.internal"
 ~ db.max_connections: 20 -> 200
-+ db.ssl: True
+~ db.ssl: False -> True
 ~ db.timeout_seconds: 30 -> 60
+```
+
+### Serialization (`ToYaml`, `ToJson`, `ToToml`)
+Export any resolved `ConfigNode` back to YAML, JSON, or TOML:
+```csharp
+using OmegaConf.NET.Serialization;
+
+string yaml = stagingNode.ToYaml();
+string json = stagingNode.ToJson(indented: true);
+string toml = stagingNode.ToToml();
 ```
 
 ---
@@ -242,6 +260,11 @@ target_port: "${server.port}"
 
 # Fallback default syntax
 cache_ttl: "${cache.timeout:300}"
+
+# List indexing (bracket or dot notation)
+servers: ["alpha.local", "beta.local"]
+primary_server: "${servers[0]}"
+secondary_server: "${servers.1}"
 ```
 
 ### Relative & Sibling Navigation (Dot Syntax)
@@ -336,9 +359,11 @@ dotnet test -m:1
 
 ---
 
-## 🤖 AI Coding Assistants & Skills
+## 🤖 AI Coding Assistants, Skills & Transparency
 
-OmegaConf.NET includes first-class support for AI agents and coding assistants:
+> **AI & Human Review Disclosure**: This project was developed with the assistance of AI coding models (including Google Gemini) and has been reviewed, tested, and verified by human maintainers.
+
+OmegaConf.NET also includes first-class support for AI agents and coding assistants:
 - [**AGENTS.md**](AGENTS.md): Repository architecture manual, build rules, and operating directives for AI agents.
 - [**SKILL.md**](skills/omegaconf-net/SKILL.md): Dedicated AI skill with prompt instructions, syntax tables, operator rules, and best practices for consuming OmegaConf.NET in any project.
 

@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using OmegaConf.NET.Attributes;
+using OmegaConf.NET.Binding;
 
 namespace OmegaConf.NET.Schema;
 
@@ -51,6 +52,8 @@ public static class JsonSchemaGenerator
 
     private static void PopulateProperties(Type type, JsonObject propertiesNode, JsonArray requiredNode)
     {
+        var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         var props = type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
                         .Where(p => p.CanWrite && p.GetCustomAttribute<ConfigIgnoreAttribute>() == null);
 
@@ -66,6 +69,41 @@ public static class JsonSchemaGenerator
 
             var propSchema = GeneratePropertySchema(prop.PropertyType);
             propertiesNode[key] = propSchema;
+            seenKeys.Add(key);
+        }
+
+        // Also support positional record / constructor parameters when properties are get-only
+        var primaryCtor = type.GetConstructors(BindingFlags.Public | BindingFlags.Instance)
+                              .OrderByDescending(c => c.GetParameters().Length)
+                              .FirstOrDefault();
+
+        if (primaryCtor != null && primaryCtor.GetParameters().Length > 0)
+        {
+            foreach (var param in primaryCtor.GetParameters())
+            {
+                string paramName = param.Name ?? "";
+                if (string.IsNullOrEmpty(paramName)) continue;
+
+                var matchingProp = type.GetProperty(paramName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+                if (matchingProp?.GetCustomAttribute<ConfigIgnoreAttribute>() != null) continue;
+
+                string key = param.GetCustomAttribute<ConfigKeyAttribute>()?.Key
+                             ?? matchingProp?.GetCustomAttribute<ConfigKeyAttribute>()?.Key
+                             ?? ToSnakeCase(paramName);
+
+                if (seenKeys.Contains(key)) continue;
+
+                bool isRequired = param.GetCustomAttribute<ConfigRequiredAttribute>() != null
+                                  || matchingProp?.GetCustomAttribute<ConfigRequiredAttribute>() != null;
+
+                if (isRequired)
+                {
+                    requiredNode.Add(key);
+                }
+
+                propertiesNode[key] = GeneratePropertySchema(param.ParameterType);
+                seenKeys.Add(key);
+            }
         }
     }
 
@@ -79,7 +117,9 @@ public static class JsonSchemaGenerator
             return GeneratePropertySchema(underlying);
         }
 
-        if (propType == typeof(string) || propType == typeof(Guid) || propType == typeof(TimeSpan))
+        if (propType == typeof(string) || propType == typeof(Guid) || propType == typeof(TimeSpan) ||
+            propType == typeof(DateTime) || propType == typeof(DateTimeOffset) ||
+            propType == typeof(DateOnly) || propType == typeof(TimeOnly) || propType == typeof(Uri))
         {
             schema["type"] = "string";
             return schema;
@@ -91,7 +131,8 @@ public static class JsonSchemaGenerator
             return schema;
         }
 
-        if (propType == typeof(int) || propType == typeof(long) || propType == typeof(short) || propType == typeof(byte))
+        if (propType == typeof(int) || propType == typeof(long) || propType == typeof(short) || propType == typeof(byte) ||
+            propType == typeof(uint) || propType == typeof(ulong) || propType == typeof(ushort) || propType == typeof(sbyte))
         {
             schema["type"] = "integer";
             return schema;
@@ -150,25 +191,7 @@ public static class JsonSchemaGenerator
         return schema;
     }
 
-    private static string ToSnakeCase(string str)
-    {
-        if (string.IsNullOrEmpty(str)) return str;
-        var sb = new System.Text.StringBuilder();
-        for (int i = 0; i < str.Length; i++)
-        {
-            char c = str[i];
-            if (char.IsUpper(c))
-            {
-                if (i > 0 && str[i - 1] != '_') sb.Append('_');
-                sb.Append(char.ToLowerInvariant(c));
-            }
-            else
-            {
-                sb.Append(c);
-            }
-        }
-        return sb.ToString();
-    }
+    private static string ToSnakeCase(string str) => ConfigBinder.ToSnakeCase(str);
 
     private static bool IsGenericList(Type type, out Type? itemType)
     {
@@ -192,7 +215,7 @@ public static class JsonSchemaGenerator
         if (type.IsGenericType)
         {
             var def = type.GetGenericTypeDefinition();
-            if (def == typeof(Dictionary<,>) || def == typeof(IDictionary<,>))
+            if (def == typeof(Dictionary<,>) || def == typeof(IDictionary<,>) || def == typeof(IReadOnlyDictionary<,>))
             {
                 var args = type.GetGenericArguments();
                 keyType = args[0];

@@ -12,6 +12,15 @@
     <Version>0.1.0</Version>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);1591</NoWarn>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+    <PackageProjectUrl>https://github.com/OmegaConf-NET/OmegaConf.NET</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/OmegaConf-NET/OmegaConf.NET.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReleaseNotes>Initial 0.1.0 release. See CHANGELOG.md for full details.</PackageReleaseNotes>
   </PropertyGroup>
 
   <ItemGroup>

@@ -166,7 +166,7 @@ public class TreeResolver
 
     /// <summary>
     /// Loads a config group file, automatically cascading up parent directories with the same filename.
-    /// E.g. db/staging/postgres.yaml cascades on top of db/postgres.yaml.
+    /// E.g. db/cloud/aws/postgres.yaml cascades on top of db/cloud/postgres.yaml and db/postgres.yaml.
     /// </summary>
     private ConfigObjectNode? ResolveGroupWithCascading(
         string rootDir,
@@ -177,7 +177,6 @@ public class TreeResolver
         HashSet<string> droppedGroups)
     {
         string groupDir = Path.Combine(rootDir, group);
-        string candidatePath = Path.Combine(groupDir, subPath);
 
         string? resolvedFile = FindConfigFile(groupDir, subPath);
 
@@ -187,29 +186,38 @@ public class TreeResolver
             throw new FileNotFoundException($"Configuration file for group '{group}' at path '{subPath}' was not found in '{groupDir}'.");
         }
 
-        // Check for parent cascade:
-        // If candidate is "staging/postgres.yaml", fileName is "postgres.yaml".
-        // Check if "db/postgres.yaml" exists.
         string fileName = Path.GetFileName(resolvedFile);
         string relativeSubDir = Path.GetDirectoryName(subPath) ?? "";
 
-        ConfigObjectNode? baseCascadeNode = null;
+        ConfigObjectNode? accumulatedCascadeNode = null;
 
         if (!string.IsNullOrEmpty(relativeSubDir))
         {
-            // Look in parent folder (db/) for the matching filename
-            string parentFileCandidate = Path.Combine(groupDir, fileName);
-            if (File.Exists(parentFileCandidate) && !string.Equals(Path.GetFullPath(parentFileCandidate), Path.GetFullPath(resolvedFile), StringComparison.OrdinalIgnoreCase))
+            // Walk from groupDir down through each intermediate subdirectory (excluding the target file itself)
+            string[] subSegments = relativeSubDir.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
+            string currentCascadeDir = groupDir;
+
+            for (int i = 0; i < subSegments.Length; i++)
             {
-                baseCascadeNode = LoadFileWithHierarchy(rootDir, parentFileCandidate, selectedPaths, droppedGroups);
+                string parentFileCandidate = Path.Combine(currentCascadeDir, fileName);
+                if (File.Exists(parentFileCandidate) &&
+                    !string.Equals(Path.GetFullPath(parentFileCandidate), Path.GetFullPath(resolvedFile), StringComparison.OrdinalIgnoreCase))
+                {
+                    var layerNode = LoadFileWithHierarchy(rootDir, parentFileCandidate, selectedPaths, droppedGroups);
+                    accumulatedCascadeNode = accumulatedCascadeNode != null
+                        ? (ConfigObjectNode)OperatorEngine.Apply(accumulatedCascadeNode, layerNode)
+                        : layerNode;
+                }
+
+                currentCascadeDir = Path.Combine(currentCascadeDir, subSegments[i]);
             }
         }
 
         var currentNode = LoadFileWithHierarchy(rootDir, resolvedFile, selectedPaths, droppedGroups);
 
-        if (baseCascadeNode != null)
+        if (accumulatedCascadeNode != null)
         {
-            return (ConfigObjectNode)OperatorEngine.Apply(baseCascadeNode, currentNode);
+            return (ConfigObjectNode)OperatorEngine.Apply(accumulatedCascadeNode, currentNode);
         }
 
         return currentNode;

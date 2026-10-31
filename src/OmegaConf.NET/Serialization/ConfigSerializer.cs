@@ -1,5 +1,6 @@
 using System.Text.Json;
 using OmegaConf.NET.Ast;
+using Tomlyn;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -33,6 +34,12 @@ public static class ConfigSerializer
         return JsonSerializer.Serialize(clrObject, indented ? IndentedJsonOptions : CompactJsonOptions);
     }
 
+    public static string ToToml(ConfigNode node)
+    {
+        object? clrObject = ToClrObject(node);
+        return clrObject != null ? Toml.FromModel(clrObject) : "";
+    }
+
     public static object? ToClrObject(ConfigNode? node)
     {
         if (node == null) return null;
@@ -52,6 +59,8 @@ public static class ConfigNodeSerializationExtensions
     public static string ToYaml(this ConfigNode node) => ConfigSerializer.ToYaml(node);
 
     public static string ToJson(this ConfigNode node, bool indented = true) => ConfigSerializer.ToJson(node, indented);
+
+    public static string ToToml(this ConfigNode node) => ConfigSerializer.ToToml(node);
 
     public static object? ToClrObject(this ConfigNode node) => ConfigSerializer.ToClrObject(node);
 }
