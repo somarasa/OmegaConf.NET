@@ -317,6 +317,17 @@ builder.Services.ConfigureOmegaConf<AppConfig>(omega =>
 
 ---
 
+## 🏃 Runnable Sample Project
+
+A complete, runnable console application demonstrating tree composition, auto-cascading, CLI overrides, diffing, and schema generation is available in [`samples/QuickStart`](samples/QuickStart).
+
+Run it with:
+```bash
+dotnet run --project samples/QuickStart/QuickStart.csproj
+```
+
+---
+
 ## 🧪 Running Tests
 
 ```bash

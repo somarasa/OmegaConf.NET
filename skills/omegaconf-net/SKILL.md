@@ -238,6 +238,41 @@ builder.Services.ConfigureOmegaConf<AppConfig>(omega =>
 });
 ```
 
+### Multi-Run / Parameter Sweeps (Hydra `-m`)
+Generate all combinations across comma-separated values:
+```bash
+dotnet run -- -m db=staging/postgres,production/postgres active_workers=2,4,8
+```
+In C#:
+```csharp
+IReadOnlyList<AppConfig> configs = OmegaConfBuilder.Create<AppConfig>()
+    .SetRoot("configs")
+    .AddCliArgs(args)
+    .BuildSweeps();
+```
+
+### Config Differ
+Compare two configuration layers and inspect changes:
+```csharp
+using OmegaConf.NET.Diff;
+
+ConfigDiff diff = ConfigDiffer.Compare(baseNode, overrideNode);
+Console.WriteLine(diff.ToString());
+// Outputs: ~ key: old -> new, + key: val, - key: val
+```
+
+### JSON Schema Generation for IDE Auto-Complete
+Generate Draft-07 schemas for VS Code, Visual Studio, and Rider intellisense:
+```csharp
+using OmegaConf.NET.Schema;
+
+JsonSchemaGenerator.GenerateSchemaFile<AppConfig>("configs/config.schema.json");
+```
+Add to `config.yaml`:
+```yaml
+# yaml-language-server: $schema=./config.schema.json
+```
+
 ---
 
 ## 6. Antipatterns & Common AI Mistakes to Avoid
