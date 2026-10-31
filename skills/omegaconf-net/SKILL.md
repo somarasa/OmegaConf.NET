@@ -46,7 +46,7 @@ defaults:
   - db: staging/postgres        # Resolves db/postgres.yaml -> db/staging/postgres.yaml
   - db@replica_db: sqlite       # Mounts db/sqlite.yaml under 'replica_db' (@package directive)
   - experiment@_global_: fast   # Merges experiment/fast.yaml directly into root (@_global_)
-  - model: fast
+  - model: ${default_model}     # Interpolated default entry (supports properties, env vars, or earlier group choices)
   - optional secrets: local     # Gracefully ignored if local.yaml doesn't exist
   - _self_                      # Determines precedence of local settings below
 

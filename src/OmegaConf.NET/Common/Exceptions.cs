@@ -160,3 +160,19 @@ public class ConfigReadOnlyException : OmegaConfException
     {
     }
 }
+
+/// <summary>
+/// Thrown when dynamic <c>_target_</c> instantiation is blocked by an execution security policy or whitelist.
+/// </summary>
+public class ConfigSecurityException : OmegaConfException
+{
+    /// <summary>Gets the target type or callable identifier that was blocked.</summary>
+    public string TargetName { get; }
+
+    /// <summary>Initializes a new instance of <see cref="ConfigSecurityException"/>.</summary>
+    public ConfigSecurityException(string targetName, string message, SourceInfo? source = null)
+        : base($"Security error instantiating target '{targetName}': {message}", source)
+    {
+        TargetName = targetName;
+    }
+}

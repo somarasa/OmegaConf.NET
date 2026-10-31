@@ -28,7 +28,7 @@ OmegaConf.NET/
 │   ├── OmegaConf.NET/                  # Core library (AST, Parsers, Operators, Resolvers, Binder)
 │   └── OmegaConf.NET.Extensions/       # Microsoft.Extensions.Configuration & DI provider
 ├── tests/
-│   └── OmegaConf.NET.Tests/            # Comprehensive unit and integration test suite (101 tests)
+│   └── OmegaConf.NET.Tests/            # Comprehensive unit and integration test suite (112 tests)
 └── samples/
     └── QuickStart/                     # Runnable sample console application
 ```
@@ -84,8 +84,8 @@ OmegaConf.NET/
 - Always use `OperatorParser.ParseKey(...)` to extract the operator and clean key.
 
 ### Composition & Cascading (`src/OmegaConf.NET/Composition/`)
-- **Config Groups & Search Paths**: Subdirectories under the root config directory (e.g. `db/`, `model/`, `env/`) and optional secondary search paths configured via `builder.AddSearchPath(...)` / `builder.WithSearchPaths(...)`.
-- **Defaults List**: Top-level `defaults:` array in `config.yaml` (and nested `defaults:` inside config group files), supporting `optional group: choice` and `override group: choice` keywords.
+- **Config Groups, Search Paths & In-Memory `ConfigStore`**: Subdirectories under the root config directory (e.g. `db/`, `model/`, `env/`), secondary search paths (`builder.AddSearchPath(...)` / `hydra.searchpath`), and in-memory code-first schemas registered in `ConfigStore.Instance` or isolated `new ConfigStore()` (`builder.WithConfigStore(...)`).
+- **Defaults List & Interpolated Defaults**: Top-level `defaults:` array in `config.yaml` (and nested `defaults:` inside config group files), supporting `optional group: choice`, `override group: choice`, disabled (`null`), mandatory (`???`), multi-config lists (`[a, b]`), and interpolated paths (`- db: ${default_db}`, `- group1/group2/${group1}`, `- db: ${oc.env:DB_TYPE, postgres}`).
 - **Precedence with `_self_`**:
   - `_self_` at the end: Local file overrides defaults.
   - `_self_` at the start: Defaults override local file.
@@ -93,10 +93,11 @@ OmegaConf.NET/
   - Supports `- db@primary_db: postgres`, `- experiment@_global_: fast`, `- db@_group_.replica: postgres`, CLI `+experiment@_global_=fast`, and `# @package _global_` file headers.
 - **Auto-Cascading**: If a sub-config shares a filename with its parent folder(s) across one or multiple directory levels (e.g. `db/cloud/aws/postgres.yaml`, `db/cloud/postgres.yaml`, and `db/postgres.yaml`), parent bases are loaded and merged automatically from root to leaf.
 - **Explicit Inheritance**: `_inherits_: "../base.yaml"` or lists of files (including cross-format inheritance across YAML, JSON/JSONC, and TOML).
-- **Struct Mode, Deep CLI Modifiers & CLI Grammar Functions**:
+- **Struct Mode, Override Aliases, Deep CLI Modifiers & CLI Grammar Functions**:
   - `builder.WithStructMode()` / `node.SetStruct(true)` locks schema keys against typos (`ConfigStructException`).
+  - `hydra.aliases` / `omegaconf.aliases` and `builder.AddAlias(names, target)` expand CLI key aliases (`bs=32` -> `trainer.batch_size=32`) and value aliases (`v` -> `verbose=true`).
   - `+key=val` appends new keys; `++key=val` upserts keys; `~key.path`, `~items[0]`, `~items[-1]` deletes deep keys or list items; `~key=expected` performs conditional value-checked deletion.
-  - Supports bracket/negative list indexing (`a[0]=3`, `a[-1]=3`, `metrics[20s_labels]=42`), escaped missing literals (`\???`), and CLI functions `int()`, `float()`, `str()`, `bool()`, `sort([...][, reverse=true])`, and `extend_list(...)`.
+  - Supports bracket/negative list indexing (`a[0]=3`, `a[-1]=3`, `metrics[20s_labels]=42`), escaped missing literals (`\???`), CLI functions `int()`, `float()`, `str()`, `bool()`, `sort([...][, reverse=true])`, `shuffle(...)`, `tag(...)`, and `extend_list(...)`, and CLI inspection (`--cfg`, `--info`, `--help` via `builder.TryHandleCliInspection(out string output)`).
 - **Cycle Prevention**: Circular dependencies throw `ConfigInheritanceException`.
 
 ### Variable Interpolation (`src/OmegaConf.NET/Interpolation/`)
@@ -123,7 +124,8 @@ OmegaConf.NET/
   - `[ConfigRequired]`: Throws `MissingRequiredConfigException` if property is absent or `???`.
   - `[ConfigKey("custom")]`: Custom key alias.
   - `[ConfigIgnore]`: Skips property during binding.
-- **Dynamic & Partial Instantiation**: `_target_: "Namespace.Type, Assembly"` with optional `_args_: [...]` positional constructor arguments and `Func<T>` / `_partial_: true` factory delegate binding via `OmegaConfig.Instantiate<T>(node)`.
+- **Dynamic & Partial Instantiation & Execution Whitelist**: `_target_: "Namespace.Type, Assembly"` with optional `_args_: [...]` positional constructor arguments, `_recursive_: false`, `Func<T>` / `_partial_: true` factory delegate binding, and `ExecutionWhitelist` (`allowedTargets` / `ConfigSecurityException`) via `OmegaConfig.Instantiate<T>(node)`.
+- **Lifecycle Callbacks (`src/OmegaConf.NET/Callbacks/`)**: `IConfigCallback` / `ConfigCallback` and `CallbackManager` supporting `OnComposeConfig`, `OnRunStart`/`OnRunEnd`, `OnMultiRunStart`/`OnMultiRunEnd`, and `OnJobStart`/`OnJobEnd` (with reverse order on End hooks and fault isolation).
 
 ---
 

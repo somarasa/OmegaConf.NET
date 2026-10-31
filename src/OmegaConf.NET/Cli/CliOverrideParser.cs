@@ -22,8 +22,10 @@ public static class CliOverrideParser
         ISet<string> droppedGroups,
         List<string> remainingValueOverrides,
         string? rootDir = null,
-        IEnumerable<string>? searchPaths = null)
+        IEnumerable<string>? searchPaths = null,
+        Composition.ConfigStore? configStore = null)
     {
+        var activeStore = configStore ?? Composition.ConfigStore.Instance;
         var allSearchDirs = new List<string>();
         if (!string.IsNullOrEmpty(rootDir)) allSearchDirs.Add(rootDir);
         if (searchPaths != null)
@@ -56,7 +58,7 @@ public static class CliOverrideParser
                         string delKey = target[..eqIdx].Trim();
                         int delAtIdx = delKey.IndexOf('@');
                         string delGroup = delAtIdx > 0 ? delKey[..delAtIdx] : delKey;
-                        if (delAtIdx > 0 || allSearchDirs.Any(d => Directory.Exists(Path.Combine(d, delGroup))))
+                        if (delAtIdx > 0 || activeStore.HasGroup(delGroup) || allSearchDirs.Any(d => Directory.Exists(Path.Combine(d, delGroup))))
                         {
                             droppedGroups.Add(target);
                             continue;
@@ -76,7 +78,7 @@ public static class CliOverrideParser
 
             if (op == ConfigOperator.Assign && !groupCandidate.Contains('.') && !groupCandidate.Contains('['))
             {
-                bool isKnownGroup = atIdx > 0 || allSearchDirs.Any(d => Directory.Exists(Path.Combine(d, groupCandidate)));
+                bool isKnownGroup = atIdx > 0 || activeStore.HasGroup(groupCandidate) || allSearchDirs.Any(d => Directory.Exists(Path.Combine(d, groupCandidate)));
                 if (isKnownGroup && rawPath.StartsWith("++", StringComparison.Ordinal))
                 {
                     throw new ConfigSyntaxException($"Force-add ('++') of config groups is not supported: '{trimmed}'.");

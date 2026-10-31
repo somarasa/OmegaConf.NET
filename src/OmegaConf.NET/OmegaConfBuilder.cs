@@ -1,5 +1,7 @@
+using System.Text;
 using OmegaConf.NET.Ast;
 using OmegaConf.NET.Binding;
+using OmegaConf.NET.Callbacks;
 using OmegaConf.NET.Cli;
 using OmegaConf.NET.Common;
 using OmegaConf.NET.Composition;
@@ -12,10 +14,10 @@ namespace OmegaConf.NET;
 /// <summary>
 /// Fluent builder for composing, overriding, interpolating, and binding hierarchical configurations.
 /// Executes a four-stage resolution pipeline:
-/// 1. CLI Group Selection Extraction (<c>db=staging/postgres</c>, <c>db@primary=postgres</c>, <c>~db</c>)
-/// 2. Tree Composition, Package Directives, Auto-Cascading &amp; Explicit Inheritance (<see cref="TreeResolver"/>)
+/// 1. CLI Override Alias Expansion &amp; Group Selection Extraction (<c>db=staging/postgres</c>, <c>db@primary=postgres</c>, <c>~db</c>)
+/// 2. Tree Composition, <see cref="ConfigStore"/> Lookup, Package Directives, Auto-Cascading &amp; Explicit Inheritance (<see cref="TreeResolver"/>)
 /// 3. Deep CLI Property &amp; Operator Overrides, Struct Mode &amp; Key Deletions (<see cref="CliOverrideParser"/>)
-/// 4. Variable &amp; Expression Interpolation (<see cref="InterpolationEngine"/>)
+/// 4. Variable &amp; Expression Interpolation (<see cref="InterpolationEngine"/>) and Lifecycle Callbacks (<see cref="IConfigCallback"/>)
 /// </summary>
 public class OmegaConfBuilder
 {
@@ -24,12 +26,23 @@ public class OmegaConfBuilder
     private readonly List<string> _searchPaths = [];
     private readonly Dictionary<string, string> _selectedPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _droppedGroups = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _builderAliases = new(StringComparer.Ordinal);
     private readonly List<string> _cliArgs = [];
     private readonly List<IResolver> _customResolvers = [];
+    private readonly List<IConfigCallback> _callbacks = [];
+    private readonly List<string> _callbackWarnings = [];
     private readonly ConfigFormatRegistry _registry = ConfigFormatRegistry.Default;
+    private ConfigStore? _configStore;
+    private ExecutionWhitelist? _whitelist;
     private bool _structMode;
     private bool _readOnly;
     private string? _outputDirectory;
+    private bool _isSweepIteration;
+
+    /// <summary>
+    /// Gets any non-fatal warning messages recorded when lifecycle callbacks threw exceptions during the most recent build or sweep.
+    /// </summary>
+    public IReadOnlyList<string> CallbackWarnings => _callbackWarnings;
 
     /// <summary>
     /// Creates a new untyped <see cref="OmegaConfBuilder"/> instance.
@@ -114,9 +127,9 @@ public class OmegaConfBuilder
 
     /// <summary>
     /// Sets the entrypoint configuration file name (defaults to <c>"config.yaml"</c>).
-    /// Supports <c>.yaml</c>, <c>.yml</c>, <c>.json</c>, <c>.jsonc</c>, and <c>.toml</c>.
+    /// Supports <c>.yaml</c>, <c>.yml</c>, <c>.json</c>, <c>.jsonc</c>, <c>.toml</c>, and <see cref="ConfigStore"/> entry names.
     /// </summary>
-    /// <param name="entryFile">File name relative to the root directory.</param>
+    /// <param name="entryFile">File name relative to the root directory or <see cref="ConfigStore"/> key.</param>
     public OmegaConfBuilder SetEntryFile(string entryFile)
     {
         _entryFile = entryFile;
@@ -142,6 +155,62 @@ public class OmegaConfBuilder
     public OmegaConfBuilder DropGroup(string group)
     {
         _droppedGroups.Add(group);
+        return this;
+    }
+
+    /// <summary>
+    /// Registers one or more command-line override aliases (equivalent to <c>hydra.aliases</c> in the primary config).
+    /// Supports both key aliases (e.g. <c>AddAlias("bs, batch_size", "trainer.batch_size")</c>)
+    /// and value aliases (e.g. <c>AddAlias("verbose, v", "verbose=true")</c>).
+    /// </summary>
+    /// <param name="names">Single alias name or comma-separated alias names.</param>
+    /// <param name="target">Target key path or <c>key=value</c> expansion.</param>
+    public OmegaConfBuilder AddAlias(string names, string target)
+    {
+        _builderAliases[names] = target;
+        return this;
+    }
+
+    /// <summary>
+    /// Configures an in-memory <see cref="ConfigStore"/> for resolving code-first structured configurations and groups.
+    /// When not explicitly specified, <see cref="ConfigStore.Instance"/> is consulted automatically.
+    /// </summary>
+    /// <param name="store">The <see cref="ConfigStore"/> instance to use.</param>
+    public OmegaConfBuilder WithConfigStore(ConfigStore store)
+    {
+        _configStore = store;
+        return this;
+    }
+
+    /// <summary>
+    /// Configures an <see cref="ExecutionWhitelist"/> restricting which <c>_target_</c> types can be dynamically instantiated.
+    /// Supports exact type names (e.g. <c>"MyApp.Services.SafePlugin"</c>) and namespace wildcards (e.g. <c>"MyApp.Plugins.*"</c>).
+    /// </summary>
+    /// <param name="allowedPatterns">Allowed target type names or wildcard patterns.</param>
+    public OmegaConfBuilder WithAllowedTargets(params string[] allowedPatterns)
+    {
+        _whitelist = new ExecutionWhitelist(allowedPatterns);
+        return this;
+    }
+
+    /// <summary>
+    /// Configures an <see cref="ExecutionWhitelist"/> restricting which <c>_target_</c> types can be dynamically instantiated.
+    /// </summary>
+    /// <param name="whitelist">The execution whitelist policy.</param>
+    public OmegaConfBuilder WithExecutionWhitelist(ExecutionWhitelist whitelist)
+    {
+        _whitelist = whitelist;
+        return this;
+    }
+
+    /// <summary>
+    /// Registers a lifecycle callback (<see cref="IConfigCallback"/>) invoked during single-run builds and multi-run sweeps.
+    /// </summary>
+    /// <param name="callback">The callback instance to register.</param>
+    public OmegaConfBuilder AddCallback(IConfigCallback callback)
+    {
+        ArgumentNullException.ThrowIfNull(callback);
+        _callbacks.Add(callback);
         return this;
     }
 
@@ -217,46 +286,336 @@ public class OmegaConfBuilder
     }
 
     /// <summary>
+    /// Inspects the configured CLI arguments for Hydra diagnostic flags (<c>--cfg [all|job|hydra]</c>,
+    /// <c>--info [all|defaults|aliases|searchpath|config]</c>, or <c>--help</c> / <c>-h</c>).
+    /// When a diagnostic flag is present, populates <paramref name="output"/> with the formatted text and returns <c>true</c>.
+    /// </summary>
+    /// <param name="output">Receives the formatted inspection or help output when a flag is matched.</param>
+    /// <returns><c>true</c> if a CLI inspection/help flag was handled; otherwise <c>false</c>.</returns>
+    public bool TryHandleCliInspection(out string output)
+    {
+        output = "";
+        string? mode = null;
+        string? subArg = null;
+        var overrideArgs = new List<string>();
+
+        for (int i = 0; i < _cliArgs.Count; i++)
+        {
+            string arg = _cliArgs[i].Trim();
+            if (arg is "--help" or "-h")
+            {
+                mode = "help";
+            }
+            else if (arg is "--cfg" or "-c")
+            {
+                mode = "cfg";
+                if (i + 1 < _cliArgs.Count && !_cliArgs[i + 1].StartsWith('-') && !_cliArgs[i + 1].Contains('='))
+                {
+                    subArg = _cliArgs[++i].Trim();
+                }
+                else
+                {
+                    subArg = "all";
+                }
+            }
+            else if (arg is "--info" or "-i")
+            {
+                mode = "info";
+                if (i + 1 < _cliArgs.Count && !_cliArgs[i + 1].StartsWith('-') && !_cliArgs[i + 1].Contains('='))
+                {
+                    subArg = _cliArgs[++i].Trim();
+                }
+                else
+                {
+                    subArg = "all";
+                }
+            }
+            else if (arg is not ("-m" or "--multirun"))
+            {
+                overrideArgs.Add(arg);
+            }
+        }
+
+        if (mode == null)
+        {
+            return false;
+        }
+
+        var activeStore = _configStore ?? ConfigStore.Instance;
+        var resolver = new TreeResolver(_registry, activeStore, _customResolvers);
+        var primaryRaw = resolver.TryLoadPrimaryEntryRaw(_rootDir, _entryFile, _searchPaths);
+        var aliases = OverrideAliases.FromConfig(primaryRaw, _builderAliases);
+
+        if (mode == "info" && string.Equals(subArg, "aliases", StringComparison.OrdinalIgnoreCase))
+        {
+            output = aliases.IsEmpty ? "No override aliases defined" : aliases.Format(overrideArgs);
+            return true;
+        }
+
+        if (mode == "help")
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"== Configuration Help ({_entryFile}) ==");
+            sb.AppendLine();
+
+            var groups = DiscoverConfigGroups(activeStore);
+            if (groups.Count > 0)
+            {
+                sb.AppendLine("== Configuration Groups ==");
+                foreach (var (grp, choices) in groups)
+                {
+                    sb.AppendLine($"  {grp}: {string.Join(", ", choices)}");
+                }
+                sb.AppendLine();
+            }
+
+            if (!aliases.IsEmpty)
+            {
+                sb.AppendLine(aliases.Format(overrideArgs));
+            }
+
+            output = sb.ToString().TrimEnd();
+            return true;
+        }
+
+        if (mode == "info")
+        {
+            var sb = new StringBuilder();
+            bool showAll = string.IsNullOrEmpty(subArg) || string.Equals(subArg, "all", StringComparison.OrdinalIgnoreCase);
+
+            if (showAll || string.Equals(subArg, "searchpath", StringComparison.OrdinalIgnoreCase))
+            {
+                sb.AppendLine("== Search Paths ==");
+                sb.AppendLine($"  - {_rootDir}");
+                foreach (var sp in _searchPaths)
+                {
+                    sb.AppendLine($"  - {sp}");
+                }
+                sb.AppendLine();
+            }
+
+            if (showAll || string.Equals(subArg, "defaults", StringComparison.OrdinalIgnoreCase))
+            {
+                sb.AppendLine("== Defaults ==");
+                if (primaryRaw != null)
+                {
+                    foreach (var d in DefaultsListParser.Parse(primaryRaw))
+                    {
+                        sb.AppendLine($"  - {d}");
+                    }
+                }
+                sb.AppendLine();
+            }
+
+            if (showAll)
+            {
+                sb.AppendLine(aliases.IsEmpty ? "No override aliases defined" : aliases.Format(overrideArgs));
+            }
+
+            output = sb.ToString().TrimEnd();
+            return true;
+        }
+
+        if (mode == "cfg")
+        {
+            var cloneBuilder = CloneConfigurationWithoutCliArgs();
+            cloneBuilder.AddCliArgs(overrideArgs);
+            var resolved = cloneBuilder.BuildNode();
+            output = resolved.ToYaml().TrimEnd();
+            return true;
+        }
+
+        return false;
+    }
+
+    private Dictionary<string, List<string>> DiscoverConfigGroups(ConfigStore activeStore)
+    {
+        var result = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var allDirs = new List<string> { _rootDir };
+        allDirs.AddRange(_searchPaths);
+
+        foreach (var dir in allDirs)
+        {
+            if (!Directory.Exists(dir)) continue;
+            foreach (var subDir in Directory.GetDirectories(dir))
+            {
+                string grpName = Path.GetFileName(subDir);
+                if (grpName.StartsWith('.')) continue;
+
+                var choices = Directory.GetFiles(subDir)
+                    .Select(Path.GetFileNameWithoutExtension)
+                    .Where(n => !string.IsNullOrEmpty(n))
+                    .Cast<string>()
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                if (choices.Count > 0)
+                {
+                    if (!result.TryGetValue(grpName, out var existing))
+                    {
+                        existing = [];
+                        result[grpName] = existing;
+                    }
+                    foreach (var c in choices)
+                    {
+                        if (!existing.Contains(c, StringComparer.OrdinalIgnoreCase))
+                        {
+                            existing.Add(c);
+                        }
+                    }
+                }
+            }
+        }
+
+        try
+        {
+            foreach (var rootEntry in activeStore.List())
+            {
+                if (!rootEntry.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase) &&
+                    activeStore.HasGroup(rootEntry))
+                {
+                    var choices = activeStore.List(rootEntry)
+                        .Where(e => e.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase))
+                        .Select(e => e[..^5])
+                        .ToList();
+                    if (choices.Count > 0)
+                    {
+                        if (!result.TryGetValue(rootEntry, out var existing))
+                        {
+                            existing = [];
+                            result[rootEntry] = existing;
+                        }
+                        foreach (var c in choices)
+                        {
+                            if (!existing.Contains(c, StringComparer.OrdinalIgnoreCase))
+                            {
+                                existing.Add(c);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Ignore ConfigStore enumeration errors during help formatting
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// Executes the full composition, CLI override, and interpolation pipeline and returns the resolved root AST node.
     /// </summary>
     /// <returns>The composed and interpolated <see cref="ConfigObjectNode"/>.</returns>
     public ConfigObjectNode BuildNode()
     {
-        // Stage 1: Separate CLI config-group selections (e.g. db=postgres, db@primary=postgres, ~db) from deep value overrides
-        var remainingCliOverrides = new List<string>();
-        CliOverrideParser.ExtractGroupSelections(_cliArgs, _selectedPaths, _droppedGroups, remainingCliOverrides, _rootDir, _searchPaths);
+        _callbackWarnings.Clear();
+        var activeStore = _configStore ?? ConfigStore.Instance;
 
-        // Stage 2: Resolve directory tree composition, defaults list, @package directives, auto-cascading, and _inherits_
-        var resolver = new TreeResolver(_registry);
-        var composedRoot = resolver.Resolve(_rootDir, _entryFile, _selectedPaths, _droppedGroups, _searchPaths);
+        var rawCliOverrides = _cliArgs
+            .Where(a => !string.IsNullOrWhiteSpace(a) && a is not ("-m" or "--multirun"))
+            .ToList();
 
-        if (_structMode)
+        // Validate that CLI overrides do not attempt to mutate hydra.aliases / omegaconf.aliases
+        OverrideAliases.ValidateCliDoesNotModifyAliases(rawCliOverrides);
+
+        // Stage 0: Load primary entry raw node to extract and expand OverrideAliases
+        var resolver = new TreeResolver(_registry, activeStore, _customResolvers);
+        var primaryRaw = resolver.TryLoadPrimaryEntryRaw(_rootDir, _entryFile, _searchPaths);
+        var aliases = OverrideAliases.FromConfig(primaryRaw, _builderAliases);
+
+        var expandedCliArgs = new List<string>(rawCliOverrides.Count);
+        var aliasOrigins = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var rawArg in rawCliOverrides)
         {
-            composedRoot.SetStruct(true);
+            string expanded = aliases.Expand(rawArg);
+            expandedCliArgs.Add(expanded);
+            if (!string.Equals(expanded, rawArg, StringComparison.Ordinal))
+            {
+                aliasOrigins[expanded] = rawArg;
+            }
         }
 
-        // Stage 3: Apply deep property overrides, deletions (~key.path), struct modifiers (+key, ++key), and mutation operators
-        CliOverrideParser.ApplyValueOverrides(composedRoot, remainingCliOverrides, _structMode, _droppedGroups);
+        var localSelectedPaths = new Dictionary<string, string>(_selectedPaths, StringComparer.OrdinalIgnoreCase);
+        var localDroppedGroups = new HashSet<string>(_droppedGroups, StringComparer.OrdinalIgnoreCase);
 
-        // Stage 4: Resolve variable interpolations (${db.host}, ${.sibling}, ${eval:...}, ${env:...}, ${oc.select:...}, ${oc.decode:...})
-        var interpolationEngine = new InterpolationEngine(composedRoot, _customResolvers);
-        interpolationEngine.ResolveAll();
-
-        // Optional Stage 5: Write reproducible .omegaconf/ snapshot if an output directory was configured
-        if (!string.IsNullOrWhiteSpace(_outputDirectory))
+        try
         {
-            string resolvedOutDir = _outputDirectory.Contains("${")
-                ? interpolationEngine.ResolveStringValue(_outputDirectory, "_output_dir_", SourceInfo.Unknown)?.ToString() ?? _outputDirectory
-                : _outputDirectory;
-            SaveRunSnapshot(composedRoot, resolvedOutDir, _cliArgs);
-        }
+            // Stage 1: Separate CLI config-group selections (e.g. db=postgres, db@primary=postgres, ~db) from deep value overrides
+            var remainingCliOverrides = new List<string>();
+            CliOverrideParser.ExtractGroupSelections(
+                expandedCliArgs,
+                localSelectedPaths,
+                localDroppedGroups,
+                remainingCliOverrides,
+                _rootDir,
+                _searchPaths,
+                activeStore);
 
-        if (_readOnly)
+            // Stage 2: Resolve directory tree & ConfigStore composition, defaults list, @package directives, auto-cascading, and _inherits_
+            var composedRoot = resolver.Resolve(_rootDir, _entryFile, localSelectedPaths, localDroppedGroups, _searchPaths);
+
+            if (_structMode)
+            {
+                composedRoot.SetStruct(true);
+            }
+
+            // Stage 3: Apply deep property overrides, deletions (~key.path), struct modifiers (+key, ++key), and mutation operators
+            CliOverrideParser.ApplyValueOverrides(composedRoot, remainingCliOverrides, _structMode, localDroppedGroups);
+
+            // Stage 4: Resolve variable interpolations (${db.host}, ${.sibling}, ${eval:...}, ${env:...}, ${oc.select:...}, ${oc.decode:...})
+            var interpolationEngine = new InterpolationEngine(composedRoot, _customResolvers);
+            interpolationEngine.ResolveAll();
+
+            // Optional Stage 5: Write reproducible .omegaconf/ snapshot if an output directory was configured
+            if (!string.IsNullOrWhiteSpace(_outputDirectory))
+            {
+                string resolvedOutDir = _outputDirectory.Contains("${")
+                    ? interpolationEngine.ResolveStringValue(_outputDirectory, "_output_dir_", SourceInfo.Unknown)?.ToString() ?? _outputDirectory
+                    : _outputDirectory;
+                SaveRunSnapshot(composedRoot, resolvedOutDir, expandedCliArgs);
+            }
+
+            // Stage 6: Dispatch Lifecycle Callbacks (when not inside an individual sweep iteration, which dispatches at sweep level)
+            if (!_isSweepIteration)
+            {
+                var callbackManager = new CallbackManager(_callbacks, composedRoot, _whitelist);
+                if (callbackManager.Callbacks.Count > 0)
+                {
+                    callbackManager.OnComposeConfig(composedRoot, _entryFile, expandedCliArgs);
+                    callbackManager.OnRunStart(composedRoot, _entryFile);
+                    callbackManager.OnJobStart(composedRoot, jobId: 0);
+                    callbackManager.OnJobEnd(composedRoot, jobId: 0, error: null);
+                    callbackManager.OnRunEnd(composedRoot, _entryFile);
+                    _callbackWarnings.AddRange(callbackManager.Warnings);
+                }
+            }
+
+            if (_readOnly)
+            {
+                composedRoot.SetReadOnly(true);
+            }
+
+            return composedRoot;
+        }
+        catch (OmegaConfException ex) when (aliasOrigins.Count > 0)
         {
-            composedRoot.SetReadOnly(true);
+            foreach (var (expanded, orig) in aliasOrigins)
+            {
+                var (_, expKey, _) = OverrideAliases.SplitOverride(expanded);
+                if (ex.Message.Contains(expanded, StringComparison.OrdinalIgnoreCase) ||
+                    ex.Message.Contains(expKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new ConfigSyntaxException(
+                        $"{ex.Message} (Alias expansion: '{orig}' -> '{expanded}')",
+                        ex.SourceLocation,
+                        ex);
+                }
+            }
+            throw;
         }
-
-        return composedRoot;
     }
 
     /// <summary>
@@ -284,14 +643,36 @@ public class OmegaConfBuilder
     /// <summary>
     /// Executes a multi-run parameter sweep (Hydra <c>-m</c> / <c>--multirun</c> style),
     /// generating a resolved <see cref="ConfigObjectNode"/> for every combination in the Cartesian product
-    /// (including <c>range()</c>, <c>linspace()</c>, <c>interval()</c>, <c>choice()</c>, and <c>glob()</c> sweep generators).
+    /// (including <c>range()</c>, <c>linspace()</c>, <c>interval()</c>, <c>choice()</c>, <c>glob()</c>, and <c>tag()</c> sweep generators).
     /// </summary>
     /// <returns>Read-only list of resolved AST nodes, one per parameter combination.</returns>
     public IReadOnlyList<ConfigObjectNode> BuildSweepNodes()
     {
+        _callbackWarnings.Clear();
+        var activeStore = _configStore ?? ConfigStore.Instance;
+
+        OverrideAliases.ValidateCliDoesNotModifyAliases(_cliArgs);
+
+        var resolver = new TreeResolver(_registry, activeStore, _customResolvers);
+        var primaryRaw = resolver.TryLoadPrimaryEntryRaw(_rootDir, _entryFile, _searchPaths);
+        var aliases = OverrideAliases.FromConfig(primaryRaw, _builderAliases);
+
+        // Expand override aliases BEFORE parsing sweep arguments so sweep aliases (e.g. bs=16,32) expand cleanly
+        var expandedSweepCliArgs = _cliArgs
+            .Select(a => a is "-m" or "--multirun" ? a : aliases.Expand(a))
+            .ToList();
+
         // Extract sweep matrix and static non-sweep arguments (passing _rootDir for glob() discovery)
-        var (nonSweepArgs, sweepMatrix) = MultiRun.SweepEngine.ParseSweepArgs(_cliArgs, _rootDir);
+        var (nonSweepArgs, sweepMatrix) = MultiRun.SweepEngine.ParseSweepArgs(expandedSweepCliArgs, _rootDir);
         var combinations = MultiRun.SweepEngine.GenerateCartesianProduct(sweepMatrix);
+
+        var callbackManager = new CallbackManager(_callbacks, primaryRaw, _whitelist);
+        bool multiRunStarted = false;
+        if (callbackManager.Callbacks.Count > 0 && primaryRaw != null)
+        {
+            callbackManager.OnMultiRunStart(primaryRaw, _entryFile);
+            multiRunStarted = true;
+        }
 
         var results = new List<ConfigObjectNode>();
         for (int jobIndex = 0; jobIndex < combinations.Count; jobIndex++)
@@ -306,33 +687,38 @@ public class OmegaConfBuilder
             }
 
             // Build an isolated configuration tree for this specific parameter combination
-            var builder = new OmegaConfBuilder()
-                .SetRootDirectory(_rootDir)
-                .WithSearchPaths(_searchPaths)
-                .SetEntryFile(_entryFile)
-                .WithStructMode(_structMode)
-                .WithReadOnly(_readOnly)
-                .AddCliArgs(iterationArgs);
+            var builder = CloneConfigurationWithoutCliArgs();
+            builder._isSweepIteration = true;
+            builder.AddCliArgs(iterationArgs);
 
             if (!string.IsNullOrWhiteSpace(_outputDirectory))
             {
                 builder.WithOutputDirectory(Path.Combine(_outputDirectory, jobIndex.ToString()));
             }
 
-            foreach (var (g, p) in _selectedPaths)
+            var jobNode = builder.BuildNode();
+            callbackManager.AppendFromConfigIfAny(jobNode, _whitelist);
+
+            if (!multiRunStarted && callbackManager.Callbacks.Count > 0)
             {
-                builder.SelectPath(g, p);
-            }
-            foreach (var d in _droppedGroups)
-            {
-                builder.DropGroup(d);
-            }
-            foreach (var r in _customResolvers)
-            {
-                builder.RegisterResolver(r);
+                callbackManager.OnMultiRunStart(jobNode, _entryFile);
+                multiRunStarted = true;
             }
 
-            results.Add(builder.BuildNode());
+            if (callbackManager.Callbacks.Count > 0)
+            {
+                callbackManager.OnComposeConfig(jobNode, _entryFile, iterationArgs);
+                callbackManager.OnJobStart(jobNode, jobIndex);
+                callbackManager.OnJobEnd(jobNode, jobIndex, error: null);
+            }
+
+            results.Add(jobNode);
+        }
+
+        if (callbackManager.Callbacks.Count > 0)
+        {
+            callbackManager.OnMultiRunEnd(results, _entryFile);
+            _callbackWarnings.AddRange(callbackManager.Warnings);
         }
 
         // If an output directory is configured for the sweep, also write multirun.yaml summary at the sweep root
@@ -359,6 +745,47 @@ public class OmegaConfBuilder
         return results;
     }
 
+    private OmegaConfBuilder CloneConfigurationWithoutCliArgs()
+    {
+        var builder = new OmegaConfBuilder()
+            .SetRootDirectory(_rootDir)
+            .WithSearchPaths(_searchPaths)
+            .SetEntryFile(_entryFile)
+            .WithStructMode(_structMode)
+            .WithReadOnly(_readOnly);
+
+        if (_configStore != null)
+        {
+            builder.WithConfigStore(_configStore);
+        }
+        if (_whitelist != null)
+        {
+            builder.WithExecutionWhitelist(_whitelist);
+        }
+        foreach (var (names, target) in _builderAliases)
+        {
+            builder.AddAlias(names, target);
+        }
+        foreach (var (g, p) in _selectedPaths)
+        {
+            builder.SelectPath(g, p);
+        }
+        foreach (var d in _droppedGroups)
+        {
+            builder.DropGroup(d);
+        }
+        foreach (var r in _customResolvers)
+        {
+            builder.RegisterResolver(r);
+        }
+        foreach (var cb in _callbacks)
+        {
+            builder.AddCallback(cb);
+        }
+
+        return builder;
+    }
+
     /// <summary>
     /// Executes a multi-run parameter sweep and binds every resulting configuration node to <typeparamref name="T"/>.
     /// </summary>
@@ -366,7 +793,7 @@ public class OmegaConfBuilder
     public IReadOnlyList<T> BuildSweeps<T>()
     {
         var nodes = BuildSweepNodes();
-        return nodes.Select(ConfigBinder.Bind<T>).ToList();
+        return nodes.Select(n => ConfigBinder.Instantiate<T>(n, null, _whitelist)).ToList();
     }
 
     /// <summary>
@@ -376,7 +803,7 @@ public class OmegaConfBuilder
     public T Build<T>()
     {
         var rootNode = BuildNode();
-        return ConfigBinder.Bind<T>(rootNode);
+        return ConfigBinder.Instantiate<T>(rootNode, null, _whitelist);
     }
 }
 
@@ -392,6 +819,9 @@ public class OmegaConfBuilder<T>
     /// Gets the underlying untyped <see cref="OmegaConfBuilder"/> instance.
     /// </summary>
     public OmegaConfBuilder InnerBuilder => _inner;
+
+    /// <inheritdoc cref="OmegaConfBuilder.CallbackWarnings"/>
+    public IReadOnlyList<string> CallbackWarnings => _inner.CallbackWarnings;
 
     /// <inheritdoc cref="OmegaConfBuilder.SetRootDirectory(string)"/>
     public OmegaConfBuilder<T> SetRootDirectory(string rootDir)
@@ -435,6 +865,41 @@ public class OmegaConfBuilder<T>
     public OmegaConfBuilder<T> DropGroup(string group)
     {
         _inner.DropGroup(group);
+        return this;
+    }
+
+    /// <inheritdoc cref="OmegaConfBuilder.AddAlias(string, string)"/>
+    public OmegaConfBuilder<T> AddAlias(string names, string target)
+    {
+        _inner.AddAlias(names, target);
+        return this;
+    }
+
+    /// <inheritdoc cref="OmegaConfBuilder.WithConfigStore(ConfigStore)"/>
+    public OmegaConfBuilder<T> WithConfigStore(ConfigStore store)
+    {
+        _inner.WithConfigStore(store);
+        return this;
+    }
+
+    /// <inheritdoc cref="OmegaConfBuilder.WithAllowedTargets(string[])"/>
+    public OmegaConfBuilder<T> WithAllowedTargets(params string[] allowedPatterns)
+    {
+        _inner.WithAllowedTargets(allowedPatterns);
+        return this;
+    }
+
+    /// <inheritdoc cref="OmegaConfBuilder.WithExecutionWhitelist(ExecutionWhitelist)"/>
+    public OmegaConfBuilder<T> WithExecutionWhitelist(ExecutionWhitelist whitelist)
+    {
+        _inner.WithExecutionWhitelist(whitelist);
+        return this;
+    }
+
+    /// <inheritdoc cref="OmegaConfBuilder.AddCallback(IConfigCallback)"/>
+    public OmegaConfBuilder<T> AddCallback(IConfigCallback callback)
+    {
+        _inner.AddCallback(callback);
         return this;
     }
 
@@ -482,6 +947,9 @@ public class OmegaConfBuilder<T>
         _inner.WithOutputDirectory(outputDir);
         return this;
     }
+
+    /// <inheritdoc cref="OmegaConfBuilder.TryHandleCliInspection(out string)"/>
+    public bool TryHandleCliInspection(out string output) => _inner.TryHandleCliInspection(out output);
 
     /// <inheritdoc cref="OmegaConfBuilder.BuildNode()"/>
     public ConfigObjectNode BuildNode() => _inner.BuildNode();

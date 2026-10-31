@@ -1,13 +1,15 @@
 using OmegaConf.NET.Ast;
+using OmegaConf.NET.Cli;
 using OmegaConf.NET.Common;
+using OmegaConf.NET.Interpolation;
 using OmegaConf.NET.Operators;
 using OmegaConf.NET.Parsers;
 
 namespace OmegaConf.NET.Composition;
 
 /// <summary>
-/// Resolves hierarchical configuration composition from a directory tree, handling:
-/// - Hydra-style <c>defaults:</c> lists and <c>_self_</c> precedence ordering
+/// Resolves hierarchical configuration composition from a directory tree and/or in-memory <see cref="ConfigStore"/>, handling:
+/// - Hydra-style <c>defaults:</c> lists, <c>_self_</c> precedence ordering, and interpolated default entries (<c>${...}</c>)
 /// - Multi-level automatic folder cascading (e.g. <c>db/postgres.yaml</c> -> <c>db/cloud/postgres.yaml</c> -> <c>db/cloud/aws/postgres.yaml</c>)
 /// - Explicit inheritance via <c>_inherits_</c> or <c>_base_</c> (including cross-format inheritance)
 /// - Circular dependency detection via a canonical file path loading stack
@@ -18,6 +20,8 @@ public class TreeResolver
     private static readonly string[] InheritKeys = ["_inherits_", "_base_"];
 
     private readonly ConfigFormatRegistry _registry;
+    private readonly ConfigStore _configStore;
+    private readonly IReadOnlyList<IResolver> _customResolvers;
     private readonly HashSet<string> _loadingStack = new(StringComparer.OrdinalIgnoreCase);
     private List<string> _searchPaths = [];
 
@@ -25,10 +29,22 @@ public class TreeResolver
     /// Initializes a new instance of the <see cref="TreeResolver"/> class.
     /// </summary>
     /// <param name="registry">Optional custom format registry; defaults to <see cref="ConfigFormatRegistry.Default"/>.</param>
-    public TreeResolver(ConfigFormatRegistry? registry = null)
+    /// <param name="configStore">Optional in-memory <see cref="ConfigStore"/>; defaults to <see cref="ConfigStore.Instance"/>.</param>
+    /// <param name="customResolvers">Optional custom interpolation resolvers used when evaluating interpolated <c>defaults:</c> entries.</param>
+    public TreeResolver(
+        ConfigFormatRegistry? registry = null,
+        ConfigStore? configStore = null,
+         IReadOnlyList<IResolver>? customResolvers = null)
     {
         _registry = registry ?? ConfigFormatRegistry.Default;
+        _configStore = configStore ?? ConfigStore.Instance;
+        _customResolvers = customResolvers ?? [];
     }
+
+    /// <summary>
+    /// Gets the active search paths resolved during the most recent <see cref="Resolve"/> call.
+    /// </summary>
+    public IReadOnlyList<string> ActiveSearchPaths => _searchPaths;
 
     /// <summary>
     /// Resolves and composes the configuration tree starting from <paramref name="rootDir"/> (and any additional <paramref name="searchPaths"/>)
@@ -67,10 +83,47 @@ public class TreeResolver
             ? new HashSet<string>(droppedGroups, StringComparer.OrdinalIgnoreCase)
             : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        string fullEntryPath = FindConfigFileAcrossSearchPaths(entryFile)
-            ?? throw new FileNotFoundException($"Entry configuration file '{entryFile}' not found in directory '{rootDir}'.");
+        string? fullEntryPath = FindConfigFileAcrossSearchPaths(entryFile);
+        if (fullEntryPath != null)
+        {
+            return LoadFileWithHierarchy(rootDir, fullEntryPath, activeSelections, activeDropped, isEntry: true);
+        }
 
-        return LoadFileWithHierarchy(rootDir, fullEntryPath, activeSelections, activeDropped, isEntry: true);
+        if (_configStore.TryLoad(entryFile, out var storedEntry) && storedEntry != null)
+        {
+            return LoadNodeWithHierarchy(rootDir, $"store://{storedEntry.Name}", storedEntry.Node, activeSelections, activeDropped, isEntry: true);
+        }
+
+        throw new FileNotFoundException($"Entry configuration file '{entryFile}' not found in directory '{rootDir}' or in ConfigStore.");
+    }
+
+    /// <summary>
+    /// Loads and parses the raw primary entrypoint configuration node without resolving its <c>defaults:</c> list,
+    /// or returns <c>null</c> if the entrypoint cannot be found. Used for early <c>hydra.aliases</c> extraction.
+    /// </summary>
+    public ConfigObjectNode? TryLoadPrimaryEntryRaw(string rootDir, string entryFile, IEnumerable<string>? searchPaths = null)
+    {
+        var dirs = new List<string> { rootDir };
+        if (searchPaths != null)
+        {
+            dirs.AddRange(searchPaths.Where(s => !string.IsNullOrWhiteSpace(s)));
+        }
+
+        foreach (var dir in dirs)
+        {
+            var found = FindConfigFile(dir, entryFile);
+            if (found != null)
+            {
+                return _registry.ParseFile(Path.GetFullPath(found));
+            }
+        }
+
+        if (_configStore.TryLoad(entryFile, out var storedEntry) && storedEntry != null)
+        {
+            return storedEntry.Node;
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -86,17 +139,35 @@ public class TreeResolver
         bool isEntry = false)
     {
         string canonicalPath = Path.GetFullPath(filePath);
-        if (!_loadingStack.Add(canonicalPath))
+        var rawNode = _registry.ParseFile(canonicalPath);
+        if (!isEntry)
         {
-            throw new ConfigInheritanceException($"Circular configuration dependency detected: '{canonicalPath}'.", new SourceInfo(filePath, 0, 0));
+            OverrideAliases.ValidateNoAliasesInIncludedConfig(rawNode, canonicalPath);
+        }
+        return LoadNodeWithHierarchy(rootDir, canonicalPath, rawNode, selectedPaths, droppedGroups, isEntry);
+    }
+
+    private ConfigObjectNode LoadNodeWithHierarchy(
+        string rootDir,
+        string canonicalId,
+        ConfigObjectNode rawNode,
+        Dictionary<string, string> selectedPaths,
+        HashSet<string> droppedGroups,
+        bool isEntry = false)
+    {
+        if (!_loadingStack.Add(canonicalId))
+        {
+            throw new ConfigInheritanceException($"Circular configuration dependency detected: '{canonicalId}'.", new SourceInfo(canonicalId, 0, 0));
         }
 
         try
         {
-            var rawNode = _registry.ParseFile(canonicalPath);
+            string currentDir = canonicalId.StartsWith("store://", StringComparison.OrdinalIgnoreCase)
+                ? rootDir
+                : (Path.GetDirectoryName(canonicalId) ?? rootDir);
 
             // Step 1: Resolve explicit inheritance (_inherits_ or _base_) if declared in this file
-            var baseNode = ResolveExplicitInheritance(rootDir, Path.GetDirectoryName(canonicalPath)!, rawNode, selectedPaths, droppedGroups);
+            var baseNode = ResolveExplicitInheritance(rootDir, currentDir, rawNode, selectedPaths, droppedGroups);
 
             ConfigObjectNode currentNode = baseNode != null
                 ? (ConfigObjectNode)OperatorEngine.Apply(baseNode, rawNode)
@@ -122,11 +193,11 @@ public class TreeResolver
                 return currentNode;
             }
 
-            return ProcessDefaultsList(rootDir, canonicalPath, currentNode, defaults, selectedPaths, droppedGroups);
+            return ProcessDefaultsList(rootDir, canonicalId, currentNode, defaults, selectedPaths, droppedGroups);
         }
         finally
         {
-            _loadingStack.Remove(canonicalPath);
+            _loadingStack.Remove(canonicalId);
         }
     }
 
@@ -171,7 +242,7 @@ public class TreeResolver
             {
                 string forceGroup = rawKey.TrimStart('+');
                 DefaultsListParser.SplitPackage(forceGroup, out forceGroup, out _);
-                if (_searchPaths.Any(sp => Directory.Exists(Path.Combine(sp, forceGroup))))
+                if (IsKnownGroup(forceGroup))
                 {
                     throw new ConfigSyntaxException($"Force-add ('++') of config groups is not supported: '{rawKey}={val}'.");
                 }
@@ -186,17 +257,23 @@ public class TreeResolver
                 string.Equals(d.Group, group, StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(d.Package ?? "", pkg ?? "", StringComparison.OrdinalIgnoreCase));
 
-            if (!alreadyInDefaults && _searchPaths.Any(sp => Directory.Exists(Path.Combine(sp, group))))
+            if (!alreadyInDefaults && ( pkg != null || IsKnownGroup(group)))
             {
                 defaults.Add(DefaultsEntry.GroupChoice(group, val, isOptional: false, package: pkg));
             }
         }
     }
 
+    private bool IsKnownGroup(string group)
+    {
+        return _searchPaths.Any(sp => Directory.Exists(Path.Combine(sp, group))) ||
+               _configStore.HasGroup(group);
+    }
+
     /// <summary>
     /// Merges all entries in the <c>defaults:</c> list in order, respecting the position of <c>_self_</c>.
     /// Entries before <c>_self_</c> are overridden by the entry file; entries after <c>_self_</c> override the entry file.
-    /// Also resolves <c>override</c> entries (e.g. <c>- override db: mysql</c>).
+    /// Also resolves <c>override</c> entries (e.g. <c>- override db: mysql</c>) and interpolated default entries (<c>${...}</c>).
     /// </summary>
     private ConfigObjectNode ProcessDefaultsList(
         string rootDir,
@@ -262,24 +339,26 @@ public class TreeResolver
         var afterSelf = defaults.Skip(selfIndex + 1).Where(d => !d.IsSelf).ToList();
 
         ConfigObjectNode composed = new(source: new SourceInfo(entryFilePath, 0, 0));
+        var entryClone = (ConfigObjectNode)entryNode.Clone();
+        entryClone.RemoveChild(DefaultsListParser.DefaultsKey);
+
+        var resolvedGroupChoices = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         // 1. Apply defaults listed before _self_
         foreach (var entry in beforeSelf)
         {
             if (entry.IsOverride && HasGroupAlreadyBeenMounted(composed, entry)) continue;
-            ApplyDefaultEntry(composed, rootDir, entry, selectedPaths, droppedGroups);
+            ApplyDefaultEntry(composed, entryClone, rootDir, entry, defaults, selectedPaths, droppedGroups, resolvedGroupChoices);
         }
 
         // 2. Apply _self_ (the local properties of the entry file itself, excluding the 'defaults' key)
-        var entryClone = (ConfigObjectNode)entryNode.Clone();
-        entryClone.RemoveChild(DefaultsListParser.DefaultsKey);
-        composed = (ConfigObjectNode)OperatorEngine.Apply(composed, entryClone);
+        composed = (ConfigObjectNode)OperatorEngine.Apply(composed, (ConfigObjectNode)entryClone.Clone());
 
         // 3. Apply defaults listed after _self_
         foreach (var entry in afterSelf)
         {
             if (entry.IsOverride && HasGroupAlreadyBeenMounted(composed, entry)) continue;
-            ApplyDefaultEntry(composed, rootDir, entry, selectedPaths, droppedGroups);
+            ApplyDefaultEntry(composed, entryClone, rootDir, entry, defaults, selectedPaths, droppedGroups, resolvedGroupChoices);
         }
 
         return composed;
@@ -299,13 +378,17 @@ public class TreeResolver
     /// <summary>
     /// Resolves a single <see cref="DefaultsEntry"/> and mounts the resulting node under its target package
     /// (which defaults to <see cref="DefaultsEntry.Group"/>, or merges into the root when <c>@_global_</c> is used).
+    /// Evaluates any <c>${...}</c> interpolation in the default entry's path against earlier group choices and composed properties.
     /// </summary>
     private void ApplyDefaultEntry(
         ConfigObjectNode target,
+        ConfigObjectNode entrySelfNode,
         string rootDir,
         DefaultsEntry entry,
+        List<DefaultsEntry> allDefaults,
         Dictionary<string, string> selectedPaths,
-        HashSet<string> droppedGroups)
+        HashSet<string> droppedGroups,
+        Dictionary<string, string> resolvedGroupChoices)
     {
         if (string.IsNullOrEmpty(entry.Group)) return;
 
@@ -369,17 +452,33 @@ public class TreeResolver
             return;
         }
 
+        // Evaluate interpolated defaults entry (e.g. "- db: ${default_db}", "- group1/group2/${group1}", "- db: ${oc.env:DB_TYPE, postgres}")
+        if (subPath.Contains("${", StringComparison.Ordinal))
+        {
+            subPath = ResolveInterpolatedDefaultPath(subPath, entry, target, entrySelfNode, allDefaults, selectedPaths, resolvedGroupChoices);
+        }
+
         // Mandatory missing group (- db: ??? when not overridden)
         if (string.Equals(subPath, "???", StringComparison.Ordinal))
         {
             throw new MissingValueMarkerException(entry.SelectionKey, target.Source);
         }
 
+        resolvedGroupChoices[entry.SelectionKey] = subPath;
+        if (string.IsNullOrEmpty(entry.Package))
+        {
+            resolvedGroupChoices[entry.Group] = subPath;
+        }
+
         // Multi-config list selection (- callbacks: [a, b] or CLI callbacks=[a,b])
         List<string> pathsToLoad;
         if (!wasOverridden && entry.MultiPaths is { Count: > 0 })
         {
-            pathsToLoad = entry.MultiPaths.ToList();
+            pathsToLoad = entry.MultiPaths
+                .Select(p => p.Contains("${", StringComparison.Ordinal)
+                    ? ResolveInterpolatedDefaultPath(p, entry, target, entrySelfNode, allDefaults, selectedPaths, resolvedGroupChoices)
+                    : p)
+                .ToList();
         }
         else if (subPath.StartsWith('[') && subPath.EndsWith(']'))
         {
@@ -413,6 +512,57 @@ public class TreeResolver
                 MountPackageNode(target, targetPackage, groupNode);
             }
         }
+    }
+
+    private string ResolveInterpolatedDefaultPath(
+        string rawSubPath,
+        DefaultsEntry currentEntry,
+        ConfigObjectNode composedSoFar,
+        ConfigObjectNode entrySelfNode,
+        List<DefaultsEntry> allDefaults,
+        Dictionary<string, string> selectedPaths,
+        Dictionary<string, string> resolvedGroupChoices)
+    {
+        // Detect circular interpolation across defaults entries (e.g. group1: ${group2}, group2: ${group1})
+        foreach (var other in allDefaults)
+        {
+            if (other.IsSelf || string.IsNullOrEmpty(other.Group) || ReferenceEquals(other, currentEntry)) continue;
+            if (rawSubPath.Contains($"${{{other.SelectionKey}}}", StringComparison.OrdinalIgnoreCase) ||
+                rawSubPath.Contains($"${{{other.Group}}}", StringComparison.OrdinalIgnoreCase))
+            {
+                string? otherPath = selectedPaths.TryGetValue(other.SelectionKey, out var ov) ? ov : other.Path;
+                if (otherPath != null &&
+                    (otherPath.Contains($"${{{currentEntry.SelectionKey}}}", StringComparison.OrdinalIgnoreCase) ||
+                     otherPath.Contains($"${{{currentEntry.Group}}}", StringComparison.OrdinalIgnoreCase)))
+                {
+                    throw new ConfigInterpolationException(
+                        $"Circular interpolation detected in defaults list between '{currentEntry.SelectionKey}' and '{other.SelectionKey}'.",
+                        composedSoFar.Source);
+                }
+            }
+        }
+
+        // Build evaluation context combining composed properties, _self_ properties, and earlier resolved group choices
+        var contextNode = (ConfigObjectNode)OperatorEngine.Apply(composedSoFar.Clone(), entrySelfNode.Clone());
+        foreach (var (groupKey, choiceVal) in resolvedGroupChoices)
+        {
+            // If groupKey in contextNode is a mounted ConfigObjectNode (or absent), allow ${groupKey} to resolve to the chosen config name
+            if (!contextNode.TryGetChild(groupKey, out var existing) || existing is ConfigObjectNode)
+            {
+                contextNode.SetChild(groupKey, new ConfigValueNode(choiceVal), allowNewKeyInStruct: true);
+            }
+        }
+        foreach (var (selKey, selVal) in selectedPaths)
+        {
+            if (!contextNode.TryGetChild(selKey, out var existingSel) || existingSel is ConfigValueNode)
+            {
+                contextNode.SetChild(selKey, new ConfigValueNode(selVal), allowNewKeyInStruct: true);
+            }
+        }
+
+        var engine = new InterpolationEngine(contextNode, _customResolvers);
+        var resolvedObj = engine.ResolveStringValue(rawSubPath, $"defaults.{currentEntry.SelectionKey}", composedSoFar.Source);
+        return resolvedObj?.ToString()?.Trim().TrimStart('/') ?? "";
     }
 
     /// <summary>
@@ -491,8 +641,32 @@ public class TreeResolver
 
         if (resolvedFile == null)
         {
+            if (_configStore.TryLoad(group, subPath, out var storedGroup) && storedGroup != null)
+            {
+                var composedStored = LoadNodeWithHierarchy(
+                    rootDir,
+                    $"store://{storedGroup.Group}/{storedGroup.Name}",
+                    storedGroup.Node,
+                    selectedPaths,
+                    droppedGroups);
+                return (composedStored, storedGroup.Package);
+            }
+
+            if (string.Equals(group, subPath, StringComparison.OrdinalIgnoreCase) &&
+                _configStore.TryLoad(null, subPath, out var storedRoot) &&
+                storedRoot != null)
+            {
+                var composedRootStored = LoadNodeWithHierarchy(
+                    rootDir,
+                    $"store://{storedRoot.Name}",
+                    storedRoot.Node,
+                    selectedPaths,
+                    droppedGroups);
+                return (composedRootStored, storedRoot.Package ?? DefaultsEntry.GlobalPackage);
+            }
+
             if (isOptional) return (null, null);
-            throw new FileNotFoundException($"Configuration file for group '{group}' at path '{subPath}' was not found in '{matchedGroupDir}'.");
+            throw new FileNotFoundException($"Configuration file for group '{group}' at path '{subPath}' was not found in '{matchedGroupDir}' or in ConfigStore.");
         }
 
         string? filePackageHeader = ExtractFilePackageHeader(resolvedFile);

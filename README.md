@@ -367,10 +367,30 @@ var node = OmegaConfBuilder.Create()
 var merged = OmegaConfig.Merge(OmegaConfig.ParseYaml(yaml), OmegaConfig.ParseJson(json));
 int port = OmegaConfig.Select(merged, "db.port", 5432);
 
-// Dynamic instantiation with _target_, positional _args_, _recursive_: false, call-site overrides, or lazy Func<T> factories (_partial_)
-var client = OmegaConfig.Instantiate<IEndpointClient>(merged.SelectNode("client")!, new { port = 9090 });
+// Dynamic instantiation with _target_, positional _args_, _recursive_: false, call-site overrides,
+// lazy Func<T> factories (_partial_), and optional ExecutionWhitelist security policies:
+var client = OmegaConfig.Instantiate<IEndpointClient>(
+    merged.SelectNode("client")!,
+    new { port = 9090 },
+    allowedTargets: ["MyApp.Plugins.*"]);
 var factory = OmegaConfig.Instantiate<Func<IEndpointClient>>(merged.SelectNode("client")!);
 ```
+
+### 5. Interpolated Defaults, CLI Override Aliases, `ConfigStore`, Callbacks & CLI Inspection (`--cfg`, `--info`, `--help`)
+- **Interpolated Defaults List**: Reference properties, earlier group choices, or environment variables directly in `defaults:` (e.g. `- db: ${default_db}`, `- group1/group2/${group1}`, `- db: ${oc.env:DB_TYPE, postgres}`).
+- **CLI Override Aliases (`hydra.aliases` & `.AddAlias(...)`)**: Define short CLI flags or value shortcuts:
+  ```yaml
+  hydra:
+    aliases:
+      "batch_size, bs": trainer.batch_size
+      "verbose, v": verbose=true
+  ```
+- **In-Memory `ConfigStore` (`ConfigStore.Instance` & `.WithConfigStore(...)`)**: Register code-first C# POCOs, records, or `ConfigObjectNode` schemas in memory and compose them seamlessly with or without files on disk:
+  ```csharp
+  ConfigStore.Instance.Store(name: "postgres", node: typeof(DatabaseConfig), group: "db");
+  ```
+- **Lifecycle Callbacks (`IConfigCallback` / `ConfigCallback` & `hydra.callbacks`)**: Hook into `OnComposeConfig`, `OnRunStart`/`OnRunEnd`, `OnMultiRunStart`/`OnMultiRunEnd`, and `OnJobStart`/`OnJobEnd` via `builder.AddCallback(...)` or `hydra.callbacks` `_target_` declarations.
+- **CLI Inspection & Help (`builder.TryHandleCliInspection(out string output)`)**: Built-in support for `--cfg [all|job|hydra]`, `--info [all|defaults|aliases|searchpath]`, and `--help` / `-h`.
 
 ---
 

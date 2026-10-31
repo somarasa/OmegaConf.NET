@@ -178,7 +178,7 @@ public static class DefaultsListParser
 
                     SplitPackage(trimmed, out string withoutPkg, out string? pkg);
 
-                    int slashIdx = withoutPkg.IndexOf('/');
+                    int slashIdx = withoutPkg.LastIndexOf('/');
                     if (slashIdx > 0)
                     {
                         string group = withoutPkg[..slashIdx];

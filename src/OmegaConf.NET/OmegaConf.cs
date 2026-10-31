@@ -88,18 +88,38 @@ public static class OmegaConfig
 
     /// <summary>
     /// Dynamically instantiates an object from a configuration node containing <c>_target_</c>,
+    /// enforcing an <see cref="ExecutionWhitelist"/> of allowed target type names or <c>Namespace.*</c> wildcard patterns.
+    /// </summary>
+    public static T Instantiate<T>(ConfigNode node, IEnumerable<string> allowedTargets) =>
+        ConfigBinder.Instantiate<T>(node, null, allowedTargets);
+
+    /// <summary>
+    /// Dynamically instantiates an object from a configuration node containing <c>_target_</c>,
+    /// enforcing an <see cref="ExecutionWhitelist"/>.
+    /// </summary>
+    public static T Instantiate<T>(ConfigNode node, ExecutionWhitelist whitelist) =>
+        ConfigBinder.Instantiate<T>(node, null, whitelist);
+
+    /// <summary>
+    /// Dynamically instantiates an object from a configuration node containing <c>_target_</c>,
     /// applying call-site parameter overrides from a dictionary.
     /// Equivalent to Python's <c>hydra.utils.instantiate(cfg, **overrides)</c>.
     /// </summary>
-    public static T Instantiate<T>(ConfigNode node, IDictionary<string, object?>? overrides) =>
-        ConfigBinder.Instantiate<T>(node, overrides);
+    public static T Instantiate<T>(
+        ConfigNode node,
+        IDictionary<string, object?>? overrides,
+        IEnumerable<string>? allowedTargets = null) =>
+        ConfigBinder.Instantiate<T>(node, overrides, allowedTargets);
 
     /// <summary>
     /// Dynamically instantiates an object from a configuration node containing <c>_target_</c>,
     /// applying call-site parameter overrides from an anonymous object (e.g. <c>new { Port = 9090 }</c>).
     /// </summary>
-    public static T Instantiate<T>(ConfigNode node, object anonymousOverrides) =>
-        ConfigBinder.Instantiate<T>(node, anonymousOverrides);
+    public static T Instantiate<T>(
+        ConfigNode node,
+        object anonymousOverrides,
+        IEnumerable<string>? allowedTargets = null) =>
+        ConfigBinder.Instantiate<T>(node, anonymousOverrides, allowedTargets);
 
     /// <summary>
     /// Parses an inline YAML string into a <see cref="ConfigObjectNode"/>.

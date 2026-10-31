@@ -37,6 +37,8 @@ public static class ConfigBinder
     private static readonly MethodInfo CreateFactoryMethod =
         typeof(ConfigBinder).GetMethod(nameof(CreateTypedFactory), BindingFlags.NonPublic | BindingFlags.Static)!;
 
+    private static readonly AsyncLocal<ExecutionWhitelist?> ActiveWhitelist = new();
+
     /// <summary>
     /// Dynamically instantiates an object (or <see cref="Func{TResult}"/> factory when <c>_partial_: true</c>) from a configuration node containing <c>_target_</c>.
     /// Equivalent to Python's <c>hydra.utils.instantiate(cfg, **overrides)</c>.
@@ -44,29 +46,55 @@ public static class ConfigBinder
     /// <typeparam name="T">The expected return type (or <see cref="object"/>).</typeparam>
     /// <param name="node">The configuration node containing <c>_target_</c>.</param>
     /// <param name="overrides">Optional call-site parameter overrides dictionary.</param>
-    public static T Instantiate<T>(ConfigNode node, IDictionary<string, object?>? overrides = null)
+    /// <param name="allowedTargets">Optional whitelist of allowed target type names or <c>Namespace.*</c> wildcard patterns.</param>
+    public static T Instantiate<T>(
+        ConfigNode node,
+        IDictionary<string, object?>? overrides = null,
+        IEnumerable<string>? allowedTargets = null)
     {
-        if (overrides == null || overrides.Count == 0 || node is not ConfigObjectNode objNode)
-        {
-            return Bind<T>(node);
-        }
+        var whitelist = allowedTargets != null ? new ExecutionWhitelist(allowedTargets) : null;
+        return Instantiate<T>(node, overrides, whitelist);
+    }
 
-        var merged = (ConfigObjectNode)objNode.Clone();
-        foreach (var (k, v) in overrides)
+    /// <summary>
+    /// Dynamically instantiates an object (or <see cref="Func{TResult}"/> factory when <c>_partial_: true</c>) from a configuration node containing <c>_target_</c>,
+    /// enforcing the specified <paramref name="whitelist"/>.
+    /// </summary>
+    public static T Instantiate<T>(
+        ConfigNode node,
+        IDictionary<string, object?>? overrides,
+        ExecutionWhitelist? whitelist)
+    {
+        var previous = ActiveWhitelist.Value;
+        ActiveWhitelist.Value = whitelist ?? previous;
+        try
         {
-            var overrideNode = ConvertOverrideToNode(v);
-            if (overrideNode is ConfigObjectNode overrideObj &&
-                merged.TryGetChild(k, out var existingChild) &&
-                existingChild is ConfigObjectNode existingObj)
+            if (overrides == null || overrides.Count == 0 || node is not ConfigObjectNode objNode)
             {
-                merged.SetChild(k, Operators.OperatorEngine.Apply(existingObj, overrideObj), allowNewKeyInStruct: true);
+                return Bind<T>(node);
             }
-            else
+
+            var merged = (ConfigObjectNode)objNode.Clone();
+            foreach (var (k, v) in overrides)
             {
-                merged.SetChild(k, overrideNode, allowNewKeyInStruct: true);
+                var overrideNode = ConvertOverrideToNode(v);
+                if (overrideNode is ConfigObjectNode overrideObj &&
+                    merged.TryGetChild(k, out var existingChild) &&
+                    existingChild is ConfigObjectNode existingObj)
+                {
+                    merged.SetChild(k, Operators.OperatorEngine.Apply(existingObj, overrideObj), allowNewKeyInStruct: true);
+                }
+                else
+                {
+                    merged.SetChild(k, overrideNode, allowNewKeyInStruct: true);
+                }
             }
+            return Bind<T>(merged);
         }
-        return Bind<T>(merged);
+        finally
+        {
+            ActiveWhitelist.Value = previous;
+        }
     }
 
     /// <summary>
@@ -76,11 +104,20 @@ public static class ConfigBinder
     /// <typeparam name="T">The expected return type (or <see cref="object"/>).</typeparam>
     /// <param name="node">The configuration node containing <c>_target_</c>.</param>
     /// <param name="anonymousOverrides">An object whose public readable properties override keys in <paramref name="node"/>.</param>
-    public static T Instantiate<T>(ConfigNode node, object anonymousOverrides)
+    /// <param name="allowedTargets">Optional whitelist of allowed target type names or <c>Namespace.*</c> wildcard patterns.</param>
+    public static T Instantiate<T>(
+        ConfigNode node,
+        object anonymousOverrides,
+        IEnumerable<string>? allowedTargets = null)
     {
+        if (anonymousOverrides is ExecutionWhitelist ew)
+        {
+            return Instantiate<T>(node, null, ew);
+        }
+
         if (anonymousOverrides is IDictionary<string, object?> dict)
         {
-            return Instantiate<T>(node, dict);
+            return Instantiate<T>(node, dict, allowedTargets);
         }
 
         var overrideDict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
@@ -94,7 +131,7 @@ public static class ConfigBinder
                 }
             }
         }
-        return Instantiate<T>(node, overrideDict);
+        return Instantiate<T>(node, overrideDict, allowedTargets);
     }
 
     private static ConfigNode ConvertOverrideToNode(object? value)
@@ -169,6 +206,14 @@ public static class ConfigBinder
         // 0a. Handle Func<TResult> factory delegate (Hydra _partial_ / lazy factory instantiation)
         if (targetType.IsGenericType && targetType.GetGenericTypeDefinition() == typeof(Func<>))
         {
+            if (node is ConfigObjectNode partialNode &&
+                partialNode.TryGetChild(TargetKey, out var ptNode) &&
+                ptNode is ConfigValueNode ptVal &&
+                ptVal.Value is string ptName)
+            {
+                ExecutionWhitelist.ValidateTarget(ptName, ResolveTargetType(ptName), ActiveWhitelist.Value, ptVal.Source);
+            }
+
             Type resultType = targetType.GetGenericArguments()[0];
             return CreateFactoryMethod.MakeGenericMethod(resultType).Invoke(null, [node.Clone(), currentPath])!;
         }
@@ -195,9 +240,29 @@ public static class ConfigBinder
                 if (dynObj.TryGetChild(PartialKey, out var partialVal) &&
                     partialVal is ConfigValueNode { Value: true })
                 {
+                    if (dynObj.TryGetChild(TargetKey, out var ptNode) &&
+                        ptNode is ConfigValueNode ptVal &&
+                        ptVal.Value is string ptName)
+                    {
+                        ExecutionWhitelist.ValidateTarget(ptName, ResolveTargetType(ptName), ActiveWhitelist.Value, ptVal.Source);
+                    }
+
+                    var capturedWhitelist = ActiveWhitelist.Value;
                     var clonedWithoutPartial = (ConfigObjectNode)dynObj.Clone();
                     clonedWithoutPartial.RemoveChild(PartialKey);
-                    return new Func<object>(() => Bind(clonedWithoutPartial, typeof(object), currentPath));
+                    return new Func<object>(() =>
+                    {
+                        var prev = ActiveWhitelist.Value;
+                        ActiveWhitelist.Value = capturedWhitelist ?? prev;
+                        try
+                        {
+                            return Bind(clonedWithoutPartial, typeof(object), currentPath);
+                        }
+                        finally
+                        {
+                            ActiveWhitelist.Value = prev;
+                        }
+                    });
                 }
 
                 if (dynObj.TryGetChild(TargetKey, out _))
@@ -356,6 +421,8 @@ public static class ConfigBinder
         if (objNode.TryGetChild(TargetKey, out var targetValNode) && targetValNode is ConfigValueNode tvn && tvn.Value is string targetTypeName)
         {
             var resolvedType = ResolveTargetType(targetTypeName);
+            ExecutionWhitelist.ValidateTarget(targetTypeName, resolvedType, ActiveWhitelist.Value, tvn.Source);
+
             if (resolvedType != null && targetType.IsAssignableFrom(resolvedType))
             {
                 concreteType = resolvedType;
@@ -420,7 +487,20 @@ public static class ConfigBinder
 
     private static Func<TResult> CreateTypedFactory<TResult>(ConfigNode clonedNode, string currentPath)
     {
-        return () => (TResult)Bind(clonedNode.Clone(), typeof(TResult), currentPath);
+        var capturedWhitelist = ActiveWhitelist.Value;
+        return () =>
+        {
+            var prev = ActiveWhitelist.Value;
+            ActiveWhitelist.Value = capturedWhitelist ?? prev;
+            try
+            {
+                return (TResult)Bind(clonedNode.Clone(), typeof(TResult), currentPath);
+            }
+            finally
+            {
+                ActiveWhitelist.Value = prev;
+            }
+        };
     }
 
     private static Type? ResolveTargetType(string targetTypeName)
