@@ -338,7 +338,9 @@ dotnet test -m:1
 
 ## 🤖 AI Coding Assistants & Skills
 
-OmegaConf.NET includes a dedicated [SKILL.md](skills/omegaconf-net/SKILL.md) guide tailored for AI coding assistants (Antigravity, Cursor, Claude Code, Copilot, etc.). It provides explicit prompt instructions, operator rules, syntax tables, and best practices to guide AI when generating or refactoring configs in your projects.
+OmegaConf.NET includes first-class support for AI agents and coding assistants:
+- [**AGENTS.md**](AGENTS.md): Repository architecture manual, build rules, and operating directives for AI agents.
+- [**SKILL.md**](skills/omegaconf-net/SKILL.md): Dedicated AI skill with prompt instructions, syntax tables, operator rules, and best practices for consuming OmegaConf.NET in any project.
 
 ---
 
