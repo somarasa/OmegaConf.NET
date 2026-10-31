@@ -73,25 +73,41 @@ public static class TestRunnerProgram
 
         foreach (var type in asm.GetExportedTypes().Where(t => !t.IsAbstract && t != typeof(TestRunnerProgram)))
         {
-            var methods = type.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
-                              .Where(m => m.GetCustomAttributes(typeof(FactAttribute), false).Length > 0);
+            var methods = type.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
             foreach (var method in methods)
             {
-                object? instance = Activator.CreateInstance(type);
-                try
+                bool isFact = method.GetCustomAttributes(typeof(FactAttribute), false).Length > 0;
+                var inlineDatas = method.GetCustomAttributes(typeof(InlineDataAttribute), false).Cast<InlineDataAttribute>().ToList();
+
+                if (!isFact && inlineDatas.Count == 0) continue;
+
+                List<object?[]?> datasets = inlineDatas.Count > 0
+                    ? inlineDatas.Select(d => (object?[]?)d.GetData(method).First()).ToList()
+                    : [null];
+
+                foreach (var args in datasets)
                 {
-                    method.Invoke(instance, null);
-                    Console.WriteLine($"  [PASS] {type.Name}.{method.Name}");
-                    passed++;
-                }
-                catch (System.Reflection.TargetInvocationException ex)
-                {
-                    Console.WriteLine($"  [FAIL] {type.Name}.{method.Name}: {ex.InnerException?.GetType().Name} - {ex.InnerException?.Message}");
-                    failed++;
-                }
-                finally
-                {
-                    if (instance is IDisposable d) d.Dispose();
+                    object? instance = Activator.CreateInstance(type);
+                    string label = args != null ? $"{type.Name}.{method.Name}({string.Join(", ", args)})" : $"{type.Name}.{method.Name}";
+                    try
+                    {
+                        var result = method.Invoke(instance, args);
+                        if (result is Task task)
+                        {
+                            task.GetAwaiter().GetResult();
+                        }
+                        Console.WriteLine($"  [PASS] {label}");
+                        passed++;
+                    }
+                    catch (System.Reflection.TargetInvocationException ex)
+                    {
+                        Console.WriteLine($"  [FAIL] {label}: {ex.InnerException?.GetType().Name} - {ex.InnerException?.Message}");
+                        failed++;
+                    }
+                    finally
+                    {
+                        if (instance is IDisposable d) d.Dispose();
+                    }
                 }
             }
         }
