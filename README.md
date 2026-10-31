@@ -270,6 +270,12 @@ dotnet test -m:1
 
 ---
 
+## 🤖 AI Coding Assistants & Skills
+
+OmegaConf.NET includes a dedicated [SKILL.md](skills/omegaconf-net/SKILL.md) guide tailored for AI coding assistants (Antigravity, Cursor, Claude Code, Copilot, etc.). It provides explicit prompt instructions, operator rules, syntax tables, and best practices to guide AI when generating or refactoring configs in your projects.
+
+---
+
 ## 📄 License
 
 This project is open-source under the [MIT License](LICENSE). Contributions, issues, and pull requests are warmly welcome!
