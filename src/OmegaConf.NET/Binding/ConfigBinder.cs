@@ -54,7 +54,17 @@ public static class ConfigBinder
         var merged = (ConfigObjectNode)objNode.Clone();
         foreach (var (k, v) in overrides)
         {
-            merged.SetChild(k, ConvertOverrideToNode(v), allowNewKeyInStruct: true);
+            var overrideNode = ConvertOverrideToNode(v);
+            if (overrideNode is ConfigObjectNode overrideObj &&
+                merged.TryGetChild(k, out var existingChild) &&
+                existingChild is ConfigObjectNode existingObj)
+            {
+                merged.SetChild(k, Operators.OperatorEngine.Apply(existingObj, overrideObj), allowNewKeyInStruct: true);
+            }
+            else
+            {
+                merged.SetChild(k, overrideNode, allowNewKeyInStruct: true);
+            }
         }
         return Bind<T>(merged);
     }
@@ -90,8 +100,46 @@ public static class ConfigBinder
     private static ConfigNode ConvertOverrideToNode(object? value)
     {
         if (value is ConfigNode cn) return cn.Clone();
+        if (value == null) return new ConfigValueNode(null);
         if (value is int i) return new ConfigValueNode((long)i);
-        return new ConfigValueNode(value);
+        if (value is string or bool or long or double or float or decimal or Guid or Uri or TimeSpan or DateTime or DateTimeOffset or DateOnly or TimeOnly || value.GetType().IsEnum)
+        {
+            return new ConfigValueNode(value);
+        }
+
+        if (value is IDictionary dict)
+        {
+            var objNode = new ConfigObjectNode();
+            foreach (DictionaryEntry entry in dict)
+            {
+                if (entry.Key != null)
+                {
+                    objNode.SetChild(entry.Key.ToString()!, ConvertOverrideToNode(entry.Value), allowNewKeyInStruct: true);
+                }
+            }
+            return objNode;
+        }
+
+        if (value is IEnumerable enumerable)
+        {
+            var items = new List<ConfigNode>();
+            foreach (var item in enumerable)
+            {
+                items.Add(ConvertOverrideToNode(item));
+            }
+            return new ConfigListNode(items);
+        }
+
+        // Anonymous object or POCO override -> convert public readable properties into a ConfigObjectNode
+        var anonNode = new ConfigObjectNode();
+        foreach (var prop in value.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            if (prop.CanRead)
+            {
+                anonNode.SetChild(prop.Name, ConvertOverrideToNode(prop.GetValue(value)), allowNewKeyInStruct: true);
+            }
+        }
+        return anonNode;
     }
 
     /// <summary>

@@ -103,6 +103,11 @@ public class TreeResolver
                 : rawNode;
 
             // Step 2: Process defaults list if declared in this file (supported in both entrypoint and nested group files)
+            if (isEntry)
+            {
+                ExtractSearchPathsFromConfig(rootDir, currentNode);
+            }
+
             var defaults = DefaultsListParser.Parse(currentNode);
 
             if (isEntry)
@@ -125,6 +130,33 @@ public class TreeResolver
         }
     }
 
+    private void ExtractSearchPathsFromConfig(string rootDir, ConfigObjectNode currentNode)
+    {
+        foreach (var sectionKey in new[] { "hydra", "omegaconf" })
+        {
+            if (currentNode.TryGetChild(sectionKey, out var secNode) &&
+                secNode is ConfigObjectNode secObj &&
+                secObj.TryGetChild("searchpath", out var spNode) &&
+                spNode is ConfigListNode spList)
+            {
+                foreach (var item in spList.Items.OfType<ConfigValueNode>())
+                {
+                    string rawPath = item.Value?.ToString()?.Trim() ?? "";
+                    if (string.IsNullOrEmpty(rawPath)) continue;
+                    if (rawPath.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
+                    {
+                        rawPath = rawPath["file://".Length..].TrimStart('/');
+                    }
+                    string resolved = Path.IsPathRooted(rawPath) ? rawPath : Path.GetFullPath(Path.Combine(rootDir, rawPath));
+                    if (!_searchPaths.Contains(resolved, StringComparer.OrdinalIgnoreCase))
+                    {
+                        _searchPaths.Add(resolved);
+                    }
+                }
+            }
+        }
+    }
+
     /// <summary>
     /// Appends any config groups requested via <paramref name="selectedPaths"/> (such as <c>+experiment@_global_=fast</c>
     /// or <c>db@analytics_db=postgres</c>) that are not already present in the entrypoint's <c>defaults:</c> list.
@@ -135,6 +167,16 @@ public class TreeResolver
     {
         foreach (var (rawKey, val) in selectedPaths)
         {
+            if (rawKey.StartsWith("++", StringComparison.Ordinal))
+            {
+                string forceGroup = rawKey.TrimStart('+');
+                DefaultsListParser.SplitPackage(forceGroup, out forceGroup, out _);
+                if (_searchPaths.Any(sp => Directory.Exists(Path.Combine(sp, forceGroup))))
+                {
+                    throw new ConfigSyntaxException($"Force-add ('++') of config groups is not supported: '{rawKey}={val}'.");
+                }
+            }
+
             string key = rawKey.TrimStart('+');
             DefaultsListParser.SplitPackage(key, out string group, out string? pkg);
 
@@ -167,28 +209,42 @@ public class TreeResolver
         // Normalize 'override' entries:
         // 1. If an 'override' entry matches an earlier entry in the same defaults list, update that earlier entry in-place.
         // 2. Also register 'override' entries in selectedPaths (if not already overridden by CLI) so nested defaults lists pick them up.
+        // 3. Reject conflicting non-override entries for the same group/package.
         var defaults = new List<DefaultsEntry>();
         foreach (var entry in rawDefaults)
         {
-            if (entry.IsOverride && entry.Group != null)
+            if (!entry.IsSelf && entry.Group != null)
             {
-                if (!selectedPaths.ContainsKey(entry.SelectionKey) && entry.Path != null)
-                {
-                    selectedPaths[entry.SelectionKey] = entry.Path;
-                }
-
                 int existingIdx = defaults.FindIndex(d =>
                     !d.IsSelf &&
                     string.Equals(d.SelectionKey, entry.SelectionKey, StringComparison.OrdinalIgnoreCase));
 
-                if (existingIdx >= 0)
+                if (entry.IsOverride)
                 {
-                    defaults[existingIdx] = DefaultsEntry.GroupChoice(
-                        defaults[existingIdx].Group!,
-                        entry.Path ?? defaults[existingIdx].Group!,
-                        entry.IsOptional || defaults[existingIdx].IsOptional,
-                        entry.Package ?? defaults[existingIdx].Package);
-                    continue;
+                    if (!selectedPaths.ContainsKey(entry.SelectionKey) && entry.Path != null)
+                    {
+                        selectedPaths[entry.SelectionKey] = entry.Path;
+                    }
+
+                    if (existingIdx >= 0)
+                    {
+                        defaults[existingIdx] = DefaultsEntry.GroupChoice(
+                            defaults[existingIdx].Group!,
+                            entry.Path,
+                            entry.IsOptional || defaults[existingIdx].IsOptional,
+                            entry.Package ?? defaults[existingIdx].Package,
+                            isMissing: entry.IsMissing,
+                            isDisabled: entry.IsDisabled,
+                            multiPaths: entry.MultiPaths);
+                        continue;
+                    }
+                }
+                else if (existingIdx >= 0 && !string.Equals(defaults[existingIdx].Path, entry.Path, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new ConfigSyntaxException(
+                        $"Multiple values for '{entry.SelectionKey}' in defaults list ('{defaults[existingIdx].Path}' and '{entry.Path}'). " +
+                        $"To override an earlier value, use 'override {entry.SelectionKey}: {entry.Path}'.",
+                        entryNode.Source);
                 }
             }
 
@@ -260,40 +316,102 @@ public class TreeResolver
             return;
         }
 
+        // Check conditional group deletion (~group=expected_choice)
+        foreach (var dropped in droppedGroups)
+        {
+            int eqIdx = dropped.IndexOf('=');
+            if (eqIdx > 0)
+            {
+                string delKey = dropped[..eqIdx].Trim();
+                string delExpected = dropped[(eqIdx + 1)..].Trim().TrimStart('/');
+                if (string.Equals(delKey, entry.SelectionKey, StringComparison.OrdinalIgnoreCase) ||
+                    (string.IsNullOrEmpty(entry.Package) && string.Equals(delKey, entry.Group, StringComparison.OrdinalIgnoreCase)))
+                {
+                    if (string.Equals(delExpected, entry.Path, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return;
+                    }
+                    throw new ConfigSyntaxException(
+                        $"Could not delete '{dropped}'. Active choice in defaults list is '{entry.Path}'.",
+                        target.Source);
+                }
+            }
+        }
+
         // Check if the group's path was overridden via CLI (group@pkg=new/path or group=new/path) or builder.SelectPath(...)
-        string subPath;
+        string? subPath = null;
+        bool wasOverridden = false;
         if (selectedPaths.TryGetValue(entry.SelectionKey, out var exactOverride))
         {
             subPath = exactOverride;
+            wasOverridden = true;
         }
         else if (selectedPaths.TryGetValue("+" + entry.SelectionKey, out var plusOverride))
         {
             subPath = plusOverride;
+            wasOverridden = true;
         }
         else if (string.IsNullOrEmpty(entry.Package) && selectedPaths.TryGetValue(entry.Group, out var groupOverride))
         {
             subPath = groupOverride;
+            wasOverridden = true;
         }
-        else
+        else if (!entry.IsDisabled)
         {
             subPath = entry.Path ?? entry.Group;
         }
 
-        var (groupNode, filePackageHeader) = ResolveGroupWithCascading(rootDir, entry.Group, subPath, entry.IsOptional, selectedPaths, droppedGroups);
-        if (groupNode != null)
+        // Disabled group (- db: null or CLI db=null)
+        if ((entry.IsDisabled && !wasOverridden) ||
+            string.IsNullOrWhiteSpace(subPath) ||
+            string.Equals(subPath, "null", StringComparison.OrdinalIgnoreCase))
         {
-            // Precedence for target package: explicit DefaultsEntry @package > file '# @package' header > group name
-            string targetPackage = entry.Package ?? filePackageHeader ?? entry.Group.Replace('/', '.');
-            if (targetPackage.Equals("_group_", StringComparison.OrdinalIgnoreCase))
-            {
-                targetPackage = entry.Group.Replace('/', '.');
-            }
-            else if (targetPackage.StartsWith("_group_.", StringComparison.OrdinalIgnoreCase))
-            {
-                targetPackage = entry.Group.Replace('/', '.') + targetPackage["_group_".Length..];
-            }
+            return;
+        }
 
-            MountPackageNode(target, targetPackage, groupNode);
+        // Mandatory missing group (- db: ??? when not overridden)
+        if (string.Equals(subPath, "???", StringComparison.Ordinal))
+        {
+            throw new MissingValueMarkerException(entry.SelectionKey, target.Source);
+        }
+
+        // Multi-config list selection (- callbacks: [a, b] or CLI callbacks=[a,b])
+        List<string> pathsToLoad;
+        if (!wasOverridden && entry.MultiPaths is { Count: > 0 })
+        {
+            pathsToLoad = entry.MultiPaths.ToList();
+        }
+        else if (subPath.StartsWith('[') && subPath.EndsWith(']'))
+        {
+            pathsToLoad = subPath[1..^1]
+                .Split(',', StringSplitOptions.RemoveEmptyEntries)
+                .Select(s => s.Trim().TrimStart('/'))
+                .Where(s => !string.IsNullOrEmpty(s))
+                .ToList();
+        }
+        else
+        {
+            pathsToLoad = [subPath];
+        }
+
+        foreach (var singleSubPath in pathsToLoad)
+        {
+            var (groupNode, filePackageHeader) = ResolveGroupWithCascading(rootDir, entry.Group, singleSubPath, entry.IsOptional, selectedPaths, droppedGroups);
+            if (groupNode != null)
+            {
+                // Precedence for target package: explicit DefaultsEntry @package > file '# @package' header > group name
+                string targetPackage = entry.Package ?? filePackageHeader ?? entry.Group.Replace('/', '.');
+                if (targetPackage.Equals("_group_", StringComparison.OrdinalIgnoreCase))
+                {
+                    targetPackage = entry.Group.Replace('/', '.');
+                }
+                else if (targetPackage.StartsWith("_group_.", StringComparison.OrdinalIgnoreCase))
+                {
+                    targetPackage = entry.Group.Replace('/', '.') + targetPackage["_group_".Length..];
+                }
+
+                MountPackageNode(target, targetPackage, groupNode);
+            }
         }
     }
 

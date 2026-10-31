@@ -62,6 +62,21 @@ public sealed class DefaultsEntry
     public bool IsOverride { get; init; }
 
     /// <summary>
+    /// Gets a value indicating whether this entry is marked as mandatory missing (<c>group: ???</c>), requiring a CLI or builder override.
+    /// </summary>
+    public bool IsMissing { get; init; }
+
+    /// <summary>
+    /// Gets a value indicating whether this entry is explicitly disabled (<c>group: null</c>).
+    /// </summary>
+    public bool IsDisabled { get; init; }
+
+    /// <summary>
+    /// Gets the list of sub-configuration paths when a single group entry selects multiple configs (e.g. <c>- callbacks: [checkpoint, early_stopping]</c>).
+    /// </summary>
+    public IReadOnlyList<string>? MultiPaths { get; init; }
+
+    /// <summary>
     /// Creates a <see cref="DefaultsEntry"/> representing the <c>_self_</c> marker.
     /// </summary>
     public static DefaultsEntry Self() => new() { IsSelf = true };
@@ -69,17 +84,28 @@ public sealed class DefaultsEntry
     /// <summary>
     /// Creates a <see cref="DefaultsEntry"/> representing a config group selection.
     /// </summary>
-    public static DefaultsEntry GroupChoice(string group, string path, bool isOptional = false, string? package = null, bool isOverride = false)
+    public static DefaultsEntry GroupChoice(
+        string group,
+        string? path,
+        bool isOptional = false,
+        string? package = null,
+        bool isOverride = false,
+        bool isMissing = false,
+        bool isDisabled = false,
+        IReadOnlyList<string>? multiPaths = null)
     {
         string normalizedGroup = group.Trim().TrimStart('/');
         string? normalizedPkg = ExpandGroupPackageKeyword(normalizedGroup, package);
         return new()
         {
             Group = normalizedGroup,
-            Path = path.Trim().TrimStart('/'),
+            Path = path?.Trim().TrimStart('/'),
             IsOptional = isOptional,
             Package = normalizedPkg,
-            IsOverride = isOverride
+            IsOverride = isOverride,
+            IsMissing = isMissing,
+            IsDisabled = isDisabled,
+            MultiPaths = multiPaths
         };
     }
 
@@ -139,6 +165,10 @@ public static class DefaultsListParser
                 string trimmed = strVal.Trim();
                 if (string.Equals(trimmed, DefaultsEntry.SelfMarker, StringComparison.OrdinalIgnoreCase))
                 {
+                    if (result.Any(d => d.IsSelf))
+                    {
+                        throw new ConfigSyntaxException("Duplicate '_self_' defined in defaults list.", item.Source);
+                    }
                     result.Add(DefaultsEntry.Self());
                 }
                 else
@@ -181,7 +211,32 @@ public static class DefaultsListParser
                         throw new ConfigSyntaxException("Missing group name in defaults list.", obj.Source);
                     }
 
-                    string rawPath = v is ConfigValueNode vn ? vn.Value?.ToString() ?? "" : "";
+                    if (v is ConfigListNode listVal)
+                    {
+                        var multi = listVal.Items
+                            .OfType<ConfigValueNode>()
+                            .Select(i => i.Value?.ToString()?.Trim().TrimStart('/') ?? "")
+                            .Where(s => !string.IsNullOrEmpty(s))
+                            .ToList();
+                        result.Add(DefaultsEntry.GroupChoice(group, null, isOptional, keyPkg, isOverride, multiPaths: multi));
+                        continue;
+                    }
+
+                    if (v is ConfigValueNode vn)
+                    {
+                        if (vn.IsMissingMarker)
+                        {
+                            result.Add(DefaultsEntry.GroupChoice(group, "???", isOptional, keyPkg, isOverride, isMissing: true));
+                            continue;
+                        }
+                        if (vn.Value == null)
+                        {
+                            result.Add(DefaultsEntry.GroupChoice(group, null, isOptional, keyPkg, isOverride, isDisabled: true));
+                            continue;
+                        }
+                    }
+
+                    string rawPath = v is ConfigValueNode scalarVn ? scalarVn.Value?.ToString() ?? "" : "";
                     SplitPackage(rawPath, out string path, out string? valPkg);
 
                     result.Add(DefaultsEntry.GroupChoice(group, path, isOptional, keyPkg ?? valPkg, isOverride));

@@ -131,19 +131,53 @@ public static class SweepEngine
                 return true;
 
             case "sort":
-                expandedValues = ExpandSortSweep(inner);
+                expandedValues = ExpandSortSweep(key, inner, rootDir);
                 return true;
 
             case "shuffle":
-                expandedValues = ExpandShuffleSweep(inner);
+                expandedValues = ExpandShuffleSweep(key, inner, rootDir);
                 return true;
+
+            case "tag":
+            {
+                var tagArgs = SplitTopLevelCommas(inner);
+                if (tagArgs.Count < 2)
+                {
+                    throw new ArgumentException($"tag() requires at least one tag and a sweep argument: 'tag({inner})'.");
+                }
+                string innerSweepExpr = tagArgs[^1];
+                if (innerSweepExpr.StartsWith("sweep=", StringComparison.OrdinalIgnoreCase))
+                {
+                    innerSweepExpr = innerSweepExpr["sweep=".Length..].Trim();
+                }
+                return TryExpandSweepFunction(key, innerSweepExpr, rootDir, out expandedValues);
+            }
+
+            case "int":
+            case "float":
+            case "str":
+            case "bool":
+            {
+                if (TryExpandSweepFunction(key, inner, rootDir, out var innerExpanded) && innerExpanded.Count > 0)
+                {
+                    expandedValues = innerExpanded.Select(v => $"{funcName}({v})").ToList();
+                    return true;
+                }
+                var castParts = SplitTopLevelCommas(inner);
+                if (castParts.Count > 1)
+                {
+                    expandedValues = castParts.Select(v => $"{funcName}({v})").ToList();
+                    return true;
+                }
+                return false;
+            }
 
             default:
                 return false;
         }
     }
 
-    private static List<string> ExpandSortSweep(string inner)
+    private static List<string> ExpandSortSweep(string key, string inner, string? rootDir)
     {
         var parts = SplitTopLevelCommas(inner);
         bool reverse = false;
@@ -155,6 +189,19 @@ public static class SweepEngine
         else if (parts.Count > 0 && parts[^1].Replace(" ", "").Equals("reverse=false", StringComparison.OrdinalIgnoreCase))
         {
             parts.RemoveAt(parts.Count - 1);
+        }
+
+        if (parts.Count == 1)
+        {
+            string single = parts[0];
+            if (single.StartsWith("sweep=", StringComparison.OrdinalIgnoreCase))
+            {
+                single = single["sweep=".Length..].Trim();
+            }
+            if (TryExpandSweepFunction(key, single, rootDir, out var nestedExpanded) && nestedExpanded.Count > 0)
+            {
+                parts = nestedExpanded;
+            }
         }
 
         if (parts.All(p => double.TryParse(p, NumberStyles.Float, CultureInfo.InvariantCulture, out _)))
@@ -170,11 +217,15 @@ public static class SweepEngine
         return parts;
     }
 
-    private static List<string> ExpandShuffleSweep(string inner)
+    private static List<string> ExpandShuffleSweep(string key, string inner, string? rootDir)
     {
-        if (inner.StartsWith("choice(", StringComparison.OrdinalIgnoreCase) && inner.EndsWith(')'))
+        if (inner.StartsWith("sweep=", StringComparison.OrdinalIgnoreCase))
         {
-            inner = inner["choice(".Length..^1].Trim();
+            inner = inner["sweep=".Length..].Trim();
+        }
+        if (TryExpandSweepFunction(key, inner, rootDir, out var nestedExpanded) && nestedExpanded.Count > 0)
+        {
+            return nestedExpanded.OrderBy(_ => Random.Shared.Next()).ToList();
         }
         var parts = SplitTopLevelCommas(inner);
         return parts.OrderBy(_ => Random.Shared.Next()).ToList();
@@ -282,7 +333,7 @@ public static class SweepEngine
     }
 
     /// <summary>
-    /// Expands <c>glob(pattern)</c> by discovering matching configuration files in the config group directory on disk.
+    /// Expands <c>glob(pattern[, exclude=...])</c> by discovering matching configuration files in the config group directory on disk.
     /// </summary>
     private static List<string> ExpandGlob(string rawKey, string inner, string? rootDir)
     {
@@ -299,12 +350,32 @@ public static class SweepEngine
         }
 
         var args = SplitTopLevelCommas(inner);
-        string pattern = args.Count > 0 ? args[0].Trim('\'', '"') : "*";
-        if (string.IsNullOrEmpty(pattern)) pattern = "*";
+        var includePatterns = new List<string>();
+        var excludePatterns = new List<string>();
 
-        // Convert wildcard pattern (* and ?) into a regular expression
-        string regexPattern = "^" + Regex.Escape(pattern).Replace(@"\*", ".*").Replace(@"\?", ".") + "$";
-        var regex = new Regex(regexPattern, RegexOptions.IgnoreCase);
+        foreach (var rawArg in args)
+        {
+            string arg = rawArg.Trim();
+            if (arg.StartsWith("exclude=", StringComparison.OrdinalIgnoreCase))
+            {
+                string exVal = arg["exclude=".Length..].Trim();
+                excludePatterns.AddRange(ParseGlobPatternList(exVal));
+            }
+            else if (arg.StartsWith("include=", StringComparison.OrdinalIgnoreCase))
+            {
+                string incVal = arg["include=".Length..].Trim();
+                includePatterns.AddRange(ParseGlobPatternList(incVal));
+            }
+            else
+            {
+                includePatterns.AddRange(ParseGlobPatternList(arg));
+            }
+        }
+
+        if (includePatterns.Count == 0) includePatterns.Add("*");
+
+        var includeRegexes = includePatterns.Select(WildcardToRegex).ToList();
+        var excludeRegexes = excludePatterns.Select(WildcardToRegex).ToList();
 
         var matchedNames = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in Directory.GetFiles(groupDir))
@@ -316,13 +387,34 @@ public static class SweepEngine
             }
 
             string nameWithoutExt = Path.GetFileNameWithoutExtension(file);
-            if (regex.IsMatch(nameWithoutExt))
+            if (includeRegexes.Any(r => r.IsMatch(nameWithoutExt)) &&
+                !excludeRegexes.Any(r => r.IsMatch(nameWithoutExt)))
             {
                 matchedNames.Add(nameWithoutExt);
             }
         }
 
         return matchedNames.ToList();
+    }
+
+    private static List<string> ParseGlobPatternList(string raw)
+    {
+        if (raw.StartsWith('[') && raw.EndsWith(']'))
+        {
+            return SplitTopLevelCommas(raw[1..^1])
+                .Select(s => s.Trim('\'', '"', ' '))
+                .Where(s => !string.IsNullOrEmpty(s))
+                .ToList();
+        }
+
+        string single = raw.Trim('\'', '"', ' ');
+        return string.IsNullOrEmpty(single) ? [] : [single];
+    }
+
+    private static Regex WildcardToRegex(string pattern)
+    {
+        string regexPattern = "^" + Regex.Escape(pattern).Replace(@"\*", ".*").Replace(@"\?", ".") + "$";
+        return new Regex(regexPattern, RegexOptions.IgnoreCase);
     }
 
     /// <summary>

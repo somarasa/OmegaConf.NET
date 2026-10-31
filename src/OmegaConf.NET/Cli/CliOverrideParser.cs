@@ -40,13 +40,28 @@ public static class CliOverrideParser
 
             string trimmed = arg.Trim();
 
-            // 1. Check Hydra tilde syntax (~group, ~deep.key.path, ~items[0], or conditional ~key=expected_val)
+            // 1. Check Hydra tilde syntax (~group, ~group=expected_choice, ~deep.key.path, ~items[0], or conditional ~key=expected_val)
             if (trimmed.StartsWith('~'))
             {
                 string target = trimmed[1..].Trim();
-                if (!target.Contains('.') && !target.Contains('[') && !target.Contains('='))
+                if (!target.Contains('.') && !target.Contains('['))
                 {
-                    droppedGroups.Add(target);
+                    if (!target.Contains('='))
+                    {
+                        droppedGroups.Add(target);
+                    }
+                    else
+                    {
+                        int eqIdx = target.IndexOf('=');
+                        string delKey = target[..eqIdx].Trim();
+                        int delAtIdx = delKey.IndexOf('@');
+                        string delGroup = delAtIdx > 0 ? delKey[..delAtIdx] : delKey;
+                        if (delAtIdx > 0 || allSearchDirs.Any(d => Directory.Exists(Path.Combine(d, delGroup))))
+                        {
+                            droppedGroups.Add(target);
+                            continue;
+                        }
+                    }
                 }
                 // Also forward to remainingValueOverrides so deep properties, list elements, or conditional deletions are processed
                 remainingValueOverrides.Add(trimmed);
@@ -61,6 +76,12 @@ public static class CliOverrideParser
 
             if (op == ConfigOperator.Assign && !groupCandidate.Contains('.') && !groupCandidate.Contains('['))
             {
+                bool isKnownGroup = atIdx > 0 || allSearchDirs.Any(d => Directory.Exists(Path.Combine(d, groupCandidate)));
+                if (isKnownGroup && rawPath.StartsWith("++", StringComparison.Ordinal))
+                {
+                    throw new ConfigSyntaxException($"Force-add ('++') of config groups is not supported: '{trimmed}'.");
+                }
+
                 // Explicit @package redirection (e.g. db@primary_db=postgres or +experiment@_global_=fast)
                 if (atIdx > 0)
                 {
@@ -76,7 +97,7 @@ public static class CliOverrideParser
                 }
 
                 // If any search path contains a subdirectory matching 'groupCandidate' (e.g. configs/db/), treat as a config group selection
-                if (allSearchDirs.Any(d => Directory.Exists(Path.Combine(d, groupCandidate))))
+                if (isKnownGroup)
                 {
                     selectedPaths[cleanPath] = val;
                     continue;
@@ -491,40 +512,26 @@ public static class CliOverrideParser
         {
             case "int":
             {
-                var innerVal = CreateNodeFromCliValue(inner, ConfigOperator.Assign) as ConfigValueNode;
-                double d = Convert.ToDouble(innerVal?.Value ?? inner, CultureInfo.InvariantCulture);
-                resultNode = new ConfigValueNode((long)d, op, source);
+                var innerNode = CreateNodeFromCliValue(inner, ConfigOperator.Assign);
+                resultNode = ApplyCastToNode(innerNode, "int", op, source);
                 return true;
             }
             case "float":
             {
-                var innerVal = CreateNodeFromCliValue(inner, ConfigOperator.Assign) as ConfigValueNode;
-                double d = Convert.ToDouble(innerVal?.Value ?? inner, CultureInfo.InvariantCulture);
-                resultNode = new ConfigValueNode(d, op, source);
+                var innerNode = CreateNodeFromCliValue(inner, ConfigOperator.Assign);
+                resultNode = ApplyCastToNode(innerNode, "float", op, source);
                 return true;
             }
             case "str":
             {
-                var innerVal = CreateNodeFromCliValue(inner, ConfigOperator.Assign) as ConfigValueNode;
-                string s = innerVal?.Value is double dv
-                    ? (dv % 1 == 0 ? dv.ToString("0.0", CultureInfo.InvariantCulture) : dv.ToString(CultureInfo.InvariantCulture))
-                    : innerVal?.Value?.ToString() ?? inner;
-                resultNode = new ConfigValueNode(s, op, source) { IsEscapedLiteral = true };
+                var innerNode = CreateNodeFromCliValue(inner, ConfigOperator.Assign);
+                resultNode = ApplyCastToNode(innerNode, "str", op, source);
                 return true;
             }
             case "bool":
             {
-                var innerVal = CreateNodeFromCliValue(inner, ConfigOperator.Assign) as ConfigValueNode;
-                bool b = innerVal?.Value switch
-                {
-                    bool bv => bv,
-                    long lv => lv != 0,
-                    double dv => Math.Abs(dv) > 1e-15,
-                    string sv => !string.IsNullOrEmpty(sv) && !string.Equals(sv, "false", StringComparison.OrdinalIgnoreCase) && sv != "0",
-                    null => false,
-                    _ => true
-                };
-                resultNode = new ConfigValueNode(b, op, source);
+                var innerNode = CreateNodeFromCliValue(inner, ConfigOperator.Assign);
+                resultNode = ApplyCastToNode(innerNode, "bool", op, source);
                 return true;
             }
             case "extend_list":
@@ -566,6 +573,70 @@ public static class CliOverrideParser
             }
             default:
                 return false;
+        }
+    }
+
+    private static ConfigNode ApplyCastToNode(ConfigNode node, string castKind, ConfigOperator op, SourceInfo source)
+    {
+        if (node is ConfigListNode listNode)
+        {
+            var castedItems = listNode.Items
+                .Select(it => ApplyCastToNode(it, castKind, ConfigOperator.Assign, source));
+            return new ConfigListNode(castedItems, op, source);
+        }
+
+        if (node is ConfigObjectNode objNode)
+        {
+            var castedObj = new ConfigObjectNode(op, source);
+            foreach (var (k, v) in objNode.Children)
+            {
+                castedObj.SetChild(k, ApplyCastToNode(v, castKind, ConfigOperator.Assign, source), allowNewKeyInStruct: true);
+            }
+            return castedObj;
+        }
+
+        var vn = node as ConfigValueNode;
+        object? rawVal = vn?.Value;
+
+        switch (castKind)
+        {
+            case "int":
+            {
+                if (rawVal is bool bv) return new ConfigValueNode(bv ? 1L : 0L, op, source);
+                double d = Convert.ToDouble(rawVal ?? "0", CultureInfo.InvariantCulture);
+                return new ConfigValueNode((long)d, op, source);
+            }
+            case "float":
+            {
+                if (rawVal is bool bv) return new ConfigValueNode(bv ? 1.0 : 0.0, op, source);
+                double d = Convert.ToDouble(rawVal ?? "0", CultureInfo.InvariantCulture);
+                return new ConfigValueNode(d, op, source);
+            }
+            case "str":
+            {
+                string s = rawVal switch
+                {
+                    bool bv => bv ? "true" : "false",
+                    double dv => dv % 1 == 0 ? dv.ToString("0.0", CultureInfo.InvariantCulture) : dv.ToString(CultureInfo.InvariantCulture),
+                    _ => rawVal?.ToString() ?? ""
+                };
+                return new ConfigValueNode(s, op, source) { IsEscapedLiteral = true };
+            }
+            case "bool":
+            {
+                bool b = rawVal switch
+                {
+                    bool bv => bv,
+                    long lv => lv != 0,
+                    double dv => Math.Abs(dv) > 1e-15,
+                    string sv when string.Equals(sv, "true", StringComparison.OrdinalIgnoreCase) => true,
+                    string sv when string.Equals(sv, "false", StringComparison.OrdinalIgnoreCase) => false,
+                    _ => throw new ConfigSyntaxException($"Cannot cast '{rawVal}' to bool.", source)
+                };
+                return new ConfigValueNode(b, op, source);
+            }
+            default:
+                return node;
         }
     }
 

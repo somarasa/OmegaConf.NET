@@ -465,5 +465,187 @@ public class OfficialHydraTestSuitePortTests : IDisposable
         Assert.Equal("bert", nonRecTrainer.ModelName);
         var rawDict = Assert.IsType<Dictionary<string, object>>(nonRecTrainer.Optimizer);
         Assert.Equal("SGD", rawDict["name"]);
+
+        // 3. Nested call-site override merges into nested _target_ config without losing _target_ or _args_
+        var nestedOverrideTrainer = OmegaConfig.Instantiate<TrainerStub>(
+            cfg,
+            new { optimizer = new { lr = 0.09 } });
+        var mergedOpt = Assert.IsType<OptimizerStub>(nestedOverrideTrainer.Optimizer);
+        Assert.Equal("AdamW", mergedOpt.Name);
+        Assert.Equal(0.09, mergedOpt.Lr);
+    }
+
+    // =========================================================================
+    // 7. Deep Python-vs-.NET Parity Sweep: Edge Cases from defaults_list.py & grammar_functions.py
+    // =========================================================================
+
+    [Fact]
+    public void DefaultsList_NullGroup_MissingGroup_MultiListGroup_AndConditionalGroupDelete_MatchHydra()
+    {
+        string dbDir = Path.Combine(_tempDir, "db");
+        string cbDir = Path.Combine(_tempDir, "callbacks");
+        Directory.CreateDirectory(dbDir);
+        Directory.CreateDirectory(cbDir);
+
+        File.WriteAllText(Path.Combine(dbDir, "postgres.yaml"), "host: pg.local\nport: 5432");
+        File.WriteAllText(Path.Combine(dbDir, "mysql.yaml"), "host: mysql.local\nport: 3306");
+        File.WriteAllText(Path.Combine(cbDir, "checkpoint.yaml"), "save_top_k: 3");
+        File.WriteAllText(Path.Combine(cbDir, "early_stop.yaml"), "patience: 5");
+
+        // 1. Multi-config list in defaults (- callbacks: [checkpoint, early_stop]) + disabled group (- cache: null)
+        File.WriteAllText(Path.Combine(_tempDir, "config.yaml"), """
+            defaults:
+              - db: postgres
+              - callbacks: [checkpoint, early_stop]
+              - cache: null
+              - _self_
+            """);
+
+        var node = OmegaConfBuilder.Create()
+            .SetRootDirectory(_tempDir)
+            .BuildNode();
+
+        Assert.Equal("pg.local", node.Select<string>("db.host"));
+        Assert.Equal(3, node.Select<int>("callbacks.save_top_k"));
+        Assert.Equal(5, node.Select<int>("callbacks.patience"));
+        Assert.Null(node.GetChild("cache"));
+
+        // 2. Conditional group deletion (~db=postgres succeeds; ~db=mysql fails because active choice is postgres)
+        var droppedNode = OmegaConfBuilder.Create()
+            .SetRootDirectory(_tempDir)
+            .AddCliArgs("~db=postgres")
+            .BuildNode();
+        Assert.Null(droppedNode.GetChild("db"));
+
+        Assert.Throws<ConfigSyntaxException>(() =>
+            OmegaConfBuilder.Create()
+                .SetRootDirectory(_tempDir)
+                .AddCliArgs("~db=mysql")
+                .BuildNode());
+
+        // 3. Disabling a group via CLI (db=null) skips loading db
+        var cliNullNode = OmegaConfBuilder.Create()
+            .SetRootDirectory(_tempDir)
+            .AddCliArgs("db=null")
+            .BuildNode();
+        Assert.Null(cliNullNode.GetChild("db"));
+
+        // 4. Mandatory missing group (- db: ???) throws MissingValueMarkerException unless overridden on CLI
+        File.WriteAllText(Path.Combine(_tempDir, "missing_group.yaml"), """
+            defaults:
+              - db: ???
+            """);
+
+        Assert.Throws<MissingValueMarkerException>(() =>
+            OmegaConfBuilder.Create()
+                .SetRootDirectory(_tempDir)
+                .SetEntryFile("missing_group.yaml")
+                .BuildNode());
+
+        var resolvedMissingGroup = OmegaConfBuilder.Create()
+            .SetRootDirectory(_tempDir)
+            .SetEntryFile("missing_group.yaml")
+            .AddCliArgs("db=mysql")
+            .BuildNode();
+        Assert.Equal("mysql.local", resolvedMissingGroup.Select<string>("db.host"));
+    }
+
+    [Fact]
+    public void DefaultsList_DuplicateSelf_ConflictingChoicesWithoutOverride_AndForceAddGroup_Throw()
+    {
+        string dbDir = Path.Combine(_tempDir, "db");
+        Directory.CreateDirectory(dbDir);
+        File.WriteAllText(Path.Combine(dbDir, "postgres.yaml"), "port: 5432");
+        File.WriteAllText(Path.Combine(dbDir, "mysql.yaml"), "port: 3306");
+
+        // 1. Duplicate _self_ in defaults list throws ConfigSyntaxException
+        File.WriteAllText(Path.Combine(_tempDir, "dup_self.yaml"), """
+            defaults:
+              - _self_
+              - db: postgres
+              - _self_
+            """);
+
+        Assert.Throws<ConfigSyntaxException>(() =>
+            OmegaConfBuilder.Create()
+                .SetRootDirectory(_tempDir)
+                .SetEntryFile("dup_self.yaml")
+                .BuildNode());
+
+        // 2. Duplicate group choices without 'override' keyword throws ConfigSyntaxException
+        File.WriteAllText(Path.Combine(_tempDir, "conflict_group.yaml"), """
+            defaults:
+              - db: postgres
+              - db: mysql
+            """);
+
+        Assert.Throws<ConfigSyntaxException>(() =>
+            OmegaConfBuilder.Create()
+                .SetRootDirectory(_tempDir)
+                .SetEntryFile("conflict_group.yaml")
+                .BuildNode());
+
+        // 3. Force-add (++db=mysql) on a config group throws ConfigSyntaxException
+        File.WriteAllText(Path.Combine(_tempDir, "valid.yaml"), "app: test");
+        Assert.Throws<ConfigSyntaxException>(() =>
+            OmegaConfBuilder.Create()
+                .SetRootDirectory(_tempDir)
+                .SetEntryFile("valid.yaml")
+                .AddCliArgs("++db=mysql")
+                .BuildNode());
+    }
+
+    [Fact]
+    public void GrammarFunctions_GlobExclude_SingleArgRange_TagSweep_AndRecursiveCollectionCasts_MatchHydra()
+    {
+        string dbDir = Path.Combine(_tempDir, "db");
+        Directory.CreateDirectory(dbDir);
+        File.WriteAllText(Path.Combine(dbDir, "postgres.yaml"), "driver: pg");
+        File.WriteAllText(Path.Combine(dbDir, "mysql.yaml"), "driver: mysql");
+        File.WriteAllText(Path.Combine(dbDir, "sqlite.yaml"), "driver: sqlite");
+
+        File.WriteAllText(Path.Combine(_tempDir, "config.yaml"), """
+            defaults:
+              - db: postgres
+              - _self_
+            idx: 0
+            lr: 0.1
+            items: []
+            flag_str: ""
+            """);
+
+        // 1. glob(*, exclude=sqlite), single-arg range(2), and tag(exp1, sort(choice(0.2, 0.1)))
+        var sweeps = OmegaConfBuilder.Create()
+            .SetRootDirectory(_tempDir)
+            .AddCliArgs(
+                "-m",
+                "db=glob(*, exclude=sqlite)",
+                "idx=range(2)",
+                "lr=tag(fast_sweep, sort(choice(0.2, 0.1)))")
+            .BuildSweepNodes();
+
+        // 2 dbs (mysql, postgres) * 2 idx (0, 1) * 2 lr (0.1, 0.2) = 8 combinations
+        Assert.Equal(8, sweeps.Count);
+        Assert.All(sweeps, s => Assert.NotEqual("sqlite", s.Select<string>("db.driver")));
+        Assert.Equal(0L, sweeps[0].Select<long>("idx"));
+        Assert.Equal(0.1, sweeps[0].Select<double>("lr"));
+        Assert.Equal(0.2, sweeps[1].Select<double>("lr"));
+
+        // 2. Recursive int([...]) on list, lowercase str(true), and strict bool(invalid)
+        var castedNode = OmegaConfBuilder.Create()
+            .SetRootDirectory(_tempDir)
+            .AddCliArgs(
+                "items=int([1.0, '2', true])",
+                "flag_str=str(true)")
+            .BuildNode();
+
+        Assert.Equal([1L, 2L, 1L], ConfigBinder.Bind<long[]>(castedNode.GetChild("items")!));
+        Assert.Equal("true", castedNode.Select<string>("flag_str"));
+
+        Assert.Throws<ConfigSyntaxException>(() =>
+            OmegaConfBuilder.Create()
+                .SetRootDirectory(_tempDir)
+                .AddCliArgs("flag_str=bool(not_a_boolean)")
+                .BuildNode());
     }
 }

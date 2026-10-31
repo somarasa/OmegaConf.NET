@@ -28,7 +28,7 @@ OmegaConf.NET/
 │   ├── OmegaConf.NET/                  # Core library (AST, Parsers, Operators, Resolvers, Binder)
 │   └── OmegaConf.NET.Extensions/       # Microsoft.Extensions.Configuration & DI provider
 ├── tests/
-│   └── OmegaConf.NET.Tests/            # Comprehensive unit and integration test suite (98 tests)
+│   └── OmegaConf.NET.Tests/            # Comprehensive unit and integration test suite (101 tests)
 └── samples/
     └── QuickStart/                     # Runnable sample console application
 ```
