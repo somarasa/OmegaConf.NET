@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/OmegaConf.NET.Extensions/OmegaConf.NET.Extensions.csproj" />
+    <Project Path="src/OmegaConf.NET/OmegaConf.NET.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/OmegaConf.NET.Tests/OmegaConf.NET.Tests.csproj" />
+  </Folder>
+</Solution>
