@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/QuickStart/QuickStart.csproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/OmegaConf.NET.Extensions/OmegaConf.NET.Extensions.csproj" />
     <Project Path="src/OmegaConf.NET/OmegaConf.NET.csproj" />

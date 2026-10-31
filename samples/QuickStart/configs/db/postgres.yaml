@@ -1,0 +1,6 @@
+driver: postgres
+port: 5432
+user: "db_admin"
+max_connections: 50
+ssl: false
+timeout_seconds: 30

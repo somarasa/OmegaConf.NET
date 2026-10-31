@@ -154,8 +154,9 @@ OmegaConf.NET supports operators as key suffixes in YAML, JSON, and TOML, as wel
 
 ---
 
-## 💻 CLI Overrides
+## 💻 CLI Overrides & Multi-Run Sweeps
 
+### Dynamic CLI Overrides
 OmegaConf.NET translates command-line arguments dynamically:
 
 ```bash
@@ -167,6 +168,60 @@ dotnet run -- ~db
 
 # 3. Override deep properties with operators
 dotnet run -- db.max_connections=500 db.timeout_seconds+=15 active_workers+=4 debug!=true
+```
+
+### Multi-Run / Parameter Sweeps (Hydra's `-m`)
+Run grid searches or parameter combinations across multiple choices:
+```bash
+dotnet run -- -m db=staging/postgres,production/postgres active_workers=2,4,8
+```
+Programmatically in C#:
+```csharp
+IReadOnlyList<AppConfig> configs = OmegaConfBuilder.Create<AppConfig>()
+    .SetRoot("configs")
+    .AddCliArgs(args)
+    .BuildSweeps();
+
+foreach (var cfg in configs)
+{
+    Console.WriteLine($"Running with DB={cfg.Db?.Host}, Workers={cfg.ActiveWorkers}");
+}
+```
+
+---
+
+## 🔍 Config Diffing & Inspection
+
+Compare two configuration states and get a clear, hierarchical change report:
+```csharp
+using OmegaConf.NET.Diff;
+
+ConfigDiff diff = ConfigDiffer.Compare(stagingConfig, productionConfig);
+Console.WriteLine(diff.ToString());
+```
+Output:
+```text
+~ db.host: "staging-db.internal" -> "prod-db.internal"
+~ db.max_connections: 20 -> 200
++ db.ssl: True
+~ db.timeout_seconds: 30 -> 60
+```
+
+---
+
+## 📝 JSON Schema Generation (IDE Auto-Complete)
+
+Generate a standard Draft-07 JSON Schema for your C# configuration class:
+```csharp
+using OmegaConf.NET.Schema;
+
+JsonSchemaGenerator.GenerateSchemaFile<AppConfig>("configs/config.schema.json");
+```
+Add this comment to the top of your `config.yaml` to enable **instant auto-complete and validation** in VS Code, Rider, and Visual Studio:
+```yaml
+# yaml-language-server: $schema=./config.schema.json
+app_name: MyService
+active_workers: 4
 ```
 
 ---

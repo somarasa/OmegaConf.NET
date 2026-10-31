@@ -1,0 +1,3 @@
+# Auto-cascades on db/postgres.yaml!
+host: "staging-db.internal"
+max_connections: 20

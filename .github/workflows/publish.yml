@@ -1,0 +1,38 @@
+name: Publish to NuGet
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  publish:
+    name: Build, Pack & Publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build solution (Release)
+        run: dotnet build --no-restore -c Release -m:1
+
+      - name: Run test suite
+        run: dotnet test --no-build -c Release -m:1
+
+      - name: Pack NuGet packages
+        run: dotnet pack -c Release -m:1 --no-build -o nupkgs
+
+      - name: Push to NuGet.org
+        run: dotnet nuget push "nupkgs/*.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate

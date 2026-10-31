@@ -87,6 +87,53 @@ public class OmegaConfBuilder
         return composedRoot;
     }
 
+    /// <summary>
+    /// Executes a multi-run sweep (Hydra -m style), generating a configuration for every parameter combination.
+    /// </summary>
+    public IReadOnlyList<ConfigObjectNode> BuildSweepNodes()
+    {
+        var (nonSweepArgs, sweepMatrix) = MultiRun.SweepEngine.ParseSweepArgs(_cliArgs);
+        var combinations = MultiRun.SweepEngine.GenerateCartesianProduct(sweepMatrix);
+
+        var results = new List<ConfigObjectNode>();
+        foreach (var combo in combinations)
+        {
+            var iterationArgs = new List<string>(nonSweepArgs);
+            foreach (var (k, v) in combo)
+            {
+                iterationArgs.Add($"{k}={v}");
+            }
+
+            var builder = new OmegaConfBuilder()
+                .SetRootDirectory(_rootDir)
+                .SetEntryFile(_entryFile)
+                .AddCliArgs(iterationArgs);
+
+            foreach (var (g, p) in _selectedPaths)
+            {
+                builder.SelectPath(g, p);
+            }
+            foreach (var d in _droppedGroups)
+            {
+                builder.DropGroup(d);
+            }
+            foreach (var r in _customResolvers)
+            {
+                builder.RegisterResolver(r);
+            }
+
+            results.Add(builder.BuildNode());
+        }
+
+        return results;
+    }
+
+    public IReadOnlyList<T> BuildSweeps<T>()
+    {
+        var nodes = BuildSweepNodes();
+        return nodes.Select(ConfigBinder.Bind<T>).ToList();
+    }
+
     public T Build<T>()
     {
         var rootNode = BuildNode();
@@ -145,6 +192,10 @@ public class OmegaConfBuilder<T>
     }
 
     public ConfigObjectNode BuildNode() => _inner.BuildNode();
+
+    public IReadOnlyList<ConfigObjectNode> BuildSweepNodes() => _inner.BuildSweepNodes();
+
+    public IReadOnlyList<T> BuildSweeps() => _inner.BuildSweeps<T>();
 
     public T Build() => _inner.Build<T>();
 }
