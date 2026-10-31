@@ -150,10 +150,11 @@ db_keys: "${oc.dict.keys:db}"
 run_dir: "outputs/${now:yyyy-MM-dd}"
 ```
 
-### Mandatory Missing Marker (`???`)
-Set a field to `???` to indicate that a value must be supplied by a child file or CLI argument. If left unresolved at runtime, throws `MissingValueMarkerException`.
+### Mandatory Missing Marker (`???`) & Escaped Literal (`\???`)
+Set a field to `???` to indicate that a value must be supplied by a child file or CLI argument. If left unresolved at runtime, throws `MissingValueMarkerException`. Use `\???` to store the literal string `"???"`.
 ```yaml
 api_key: ???
+literal_questions: \???
 ```
 
 ---
@@ -225,17 +226,20 @@ CLI arguments passed to `.AddCliArgs(args)` can override paths, redirect `@packa
 # Select path or @package target
 dotnet run -- db=production/postgres +experiment@_global_=fast
 
-# Drop default group or delete a deep key (Hydra tilde syntax)
-dotnet run -- ~db ~server.secret_token
+# Drop default group, delete a deep key, delete a list item, or conditionally delete when value matches
+dotnet run -- ~db ~server.secret_token ~items[-1] ~legacy_flag=true
 
 # Struct mode additions (+key fails if key exists; ++key upserts safely)
 dotnet run -- +db.pool_size=20 ++db.port=5433
 
+# List element indexing, type casts, sort(), and extend_list()
+dotnet run -- items[-1]=99 port=int(8080) tags=extend_list(gpu,cluster) ranks=sort([3,1,2])
+
 # Deep property overrides with operators
 dotnet run -- db.max_connections*=2 db.timeout+=10 tags+=[gpu,cluster] debug!=true
 
-# Multi-run sweeps with range(), linspace(), choice(), and glob()
-dotnet run -- -m db=glob(*) active_workers=range(2,8,2) lr=linspace(0.01,0.1,5)
+# Multi-run sweeps with range(), linspace(), choice(), glob(), sort(), and shuffle()
+dotnet run -- -m db=glob(*) active_workers=range(2,8,2) lr=linspace(0.01,0.1,5) seed=sort(30,10,20)
 ```
 
 ### ASP.NET Core & Microsoft.Extensions.Configuration

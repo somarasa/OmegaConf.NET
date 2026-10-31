@@ -97,9 +97,15 @@ public sealed class ConfigValueNode : ConfigNode
     public string? RawTemplate { get; set; }
 
     /// <summary>
-    /// Gets a value indicating whether this node is currently set to the mandatory missing marker (<c>"???"</c>).
+    /// Gets or sets a value indicating whether a literal <c>"???"</c> string was explicitly escaped (<c>\???</c>)
+    /// so that it is treated as a regular string rather than a mandatory missing value marker.
     /// </summary>
-    public bool IsMissingMarker => _value is string s && s == MissingMarker;
+    public bool IsEscapedLiteral { get; set; }
+
+    /// <summary>
+    /// Gets a value indicating whether this node is currently set to the mandatory missing marker (<c>"???"</c>) and was not escaped (<c>\???</c>).
+    /// </summary>
+    public bool IsMissingMarker => !IsEscapedLiteral && _value is string s && s == MissingMarker;
 
     /// <inheritdoc />
     public override ConfigNodeType NodeType => ConfigNodeType.Value;
@@ -112,11 +118,31 @@ public sealed class ConfigValueNode : ConfigNode
     /// <param name="source">Optional source location metadata.</param>
     public ConfigValueNode(object? value, ConfigOperator op = ConfigOperator.Assign, SourceInfo? source = null)
     {
-        _value = value;
-        // Automatically capture the raw template if the initial string contains an interpolation token
-        if (value is string s && s.Contains("${"))
+        if (value is string rawStr)
         {
-            RawTemplate = s;
+            // Handle Hydra escaped missing literal: \??? -> literal "???" (IsMissingMarker = false)
+            if (rawStr == @"\???")
+            {
+                _value = MissingMarker;
+                IsEscapedLiteral = true;
+            }
+            else if (rawStr == @"\\???")
+            {
+                _value = @"\???";
+                IsEscapedLiteral = true;
+            }
+            else
+            {
+                _value = value;
+                if (rawStr.Contains("${"))
+                {
+                    RawTemplate = rawStr;
+                }
+            }
+        }
+        else
+        {
+            _value = value;
         }
         Operator = op;
         Source = source ?? SourceInfo.Unknown;
@@ -125,7 +151,8 @@ public sealed class ConfigValueNode : ConfigNode
     /// <inheritdoc />
     public override ConfigNode Clone() => new ConfigValueNode(_value, Operator, Source)
     {
-        RawTemplate = RawTemplate
+        RawTemplate = RawTemplate,
+        IsEscapedLiteral = IsEscapedLiteral
     };
 
     /// <inheritdoc />
@@ -337,11 +364,21 @@ public sealed class ConfigObjectNode : ConfigNode
                     if (closeIdx < 0) return null;
 
                     string idxStr = indicesPart[1..closeIdx].Trim();
-                    if (!int.TryParse(idxStr, out int index)) return null;
-
-                    if (current is ConfigListNode listNode && index >= 0 && index < listNode.Items.Count)
+                    if (int.TryParse(idxStr, out int index) && current is ConfigListNode listNode)
                     {
-                        current = listNode.Items[index];
+                        int actualIdx = index < 0 ? listNode.Items.Count + index : index;
+                        if (actualIdx >= 0 && actualIdx < listNode.Items.Count)
+                        {
+                            current = listNode.Items[actualIdx];
+                        }
+                        else
+                        {
+                            return null;
+                        }
+                    }
+                    else if (current is ConfigObjectNode bracketObj && bracketObj.TryGetChild(idxStr, out var dictChild))
+                    {
+                        current = dictChild!;
                     }
                     else
                     {
@@ -353,9 +390,10 @@ public sealed class ConfigObjectNode : ConfigNode
             }
             else if (current is ConfigListNode directList && int.TryParse(part, out int directIdx))
             {
-                if (directIdx >= 0 && directIdx < directList.Items.Count)
+                int actualIdx = directIdx < 0 ? directList.Items.Count + directIdx : directIdx;
+                if (actualIdx >= 0 && actualIdx < directList.Items.Count)
                 {
-                    current = directList.Items[directIdx];
+                    current = directList.Items[actualIdx];
                 }
                 else
                 {

@@ -21,6 +21,11 @@ public sealed class DefaultsEntry
     public const string GlobalPackage = "_global_";
 
     /// <summary>
+    /// Special Hydra package keyword (<c>"_group_"</c>) that expands to the group's own name (e.g. <c>preprocess@_group_.suffix</c> -> <c>preprocess.suffix</c>).
+    /// </summary>
+    public const string GroupPackage = "_group_";
+
+    /// <summary>
     /// Gets the configuration group folder name (e.g. <c>"db"</c>).
     /// </summary>
     public string? Group { get; init; }
@@ -52,6 +57,11 @@ public sealed class DefaultsEntry
     public bool IsOptional { get; init; }
 
     /// <summary>
+    /// Gets a value indicating whether this entry explicitly overrides an earlier default entry (<c>override group: path</c>).
+    /// </summary>
+    public bool IsOverride { get; init; }
+
+    /// <summary>
     /// Creates a <see cref="DefaultsEntry"/> representing the <c>_self_</c> marker.
     /// </summary>
     public static DefaultsEntry Self() => new() { IsSelf = true };
@@ -59,8 +69,34 @@ public sealed class DefaultsEntry
     /// <summary>
     /// Creates a <see cref="DefaultsEntry"/> representing a config group selection.
     /// </summary>
-    public static DefaultsEntry GroupChoice(string group, string path, bool isOptional = false, string? package = null) =>
-        new() { Group = group, Path = path, IsOptional = isOptional, Package = package };
+    public static DefaultsEntry GroupChoice(string group, string path, bool isOptional = false, string? package = null, bool isOverride = false)
+    {
+        string normalizedGroup = group.Trim().TrimStart('/');
+        string? normalizedPkg = ExpandGroupPackageKeyword(normalizedGroup, package);
+        return new()
+        {
+            Group = normalizedGroup,
+            Path = path.Trim().TrimStart('/'),
+            IsOptional = isOptional,
+            Package = normalizedPkg,
+            IsOverride = isOverride
+        };
+    }
+
+    private static string? ExpandGroupPackageKeyword(string group, string? package)
+    {
+        if (string.IsNullOrEmpty(package)) return null;
+        if (string.Equals(package, GroupPackage, StringComparison.OrdinalIgnoreCase))
+        {
+            return group;
+        }
+        if (package.StartsWith(GroupPackage + ".", StringComparison.OrdinalIgnoreCase))
+        {
+            string suffix = package[(GroupPackage.Length + 1)..];
+            return string.IsNullOrEmpty(group) ? suffix : $"{group}.{suffix}";
+        }
+        return package;
+    }
 
     /// <inheritdoc />
     public override string ToString()
@@ -107,12 +143,8 @@ public static class DefaultsListParser
                 }
                 else
                 {
-                    bool isOptional = false;
-                    if (trimmed.StartsWith("optional ", StringComparison.OrdinalIgnoreCase))
-                    {
-                        isOptional = true;
-                        trimmed = trimmed["optional ".Length..].Trim();
-                    }
+                    ExtractDefaultKeywords(ref trimmed, out bool isOptional, out bool isOverride);
+                    trimmed = trimmed.TrimStart('/');
 
                     SplitPackage(trimmed, out string withoutPkg, out string? pkg);
 
@@ -122,39 +154,78 @@ public static class DefaultsListParser
                         string group = withoutPkg[..slashIdx];
                         string path = withoutPkg[(slashIdx + 1)..];
                         SplitPackage(group, out group, out string? groupPkg);
-                        result.Add(DefaultsEntry.GroupChoice(group, path, isOptional, pkg ?? groupPkg));
+                        result.Add(DefaultsEntry.GroupChoice(group, path, isOptional, pkg ?? groupPkg, isOverride));
                     }
                     else
                     {
-                        result.Add(DefaultsEntry.GroupChoice(withoutPkg, withoutPkg, isOptional, pkg));
+                        result.Add(DefaultsEntry.GroupChoice(withoutPkg, withoutPkg, isOptional, pkg, isOverride));
                     }
                 }
             }
-            // Case 2: Mapping entry (e.g. "- db: staging/postgres", "- db@primary_db: postgres", or "- optional db: postgres")
+            // Case 2: Mapping entry (e.g. "- db: staging/postgres", "- db@primary_db: postgres", "- override db: mysql", or "- optional db: postgres")
             else if (item is ConfigObjectNode obj)
             {
+                if (obj.Children.Count > 1)
+                {
+                    throw new ConfigSyntaxException($"Too many keys in defaults list item: {{{string.Join(", ", obj.Children.Keys)}}}.", obj.Source);
+                }
+
                 foreach (var (k, v) in obj.Children)
                 {
                     string rawGroup = k;
-                    bool isOptional = false;
-
-                    if (rawGroup.StartsWith("optional ", StringComparison.OrdinalIgnoreCase))
-                    {
-                        isOptional = true;
-                        rawGroup = rawGroup["optional ".Length..].Trim();
-                    }
+                    ExtractDefaultKeywords(ref rawGroup, out bool isOptional, out bool isOverride);
 
                     SplitPackage(rawGroup, out string group, out string? keyPkg);
+                    if (string.IsNullOrWhiteSpace(group))
+                    {
+                        throw new ConfigSyntaxException("Missing group name in defaults list.", obj.Source);
+                    }
 
                     string rawPath = v is ConfigValueNode vn ? vn.Value?.ToString() ?? "" : "";
                     SplitPackage(rawPath, out string path, out string? valPkg);
 
-                    result.Add(DefaultsEntry.GroupChoice(group, path, isOptional, keyPkg ?? valPkg));
+                    result.Add(DefaultsEntry.GroupChoice(group, path, isOptional, keyPkg ?? valPkg, isOverride));
                 }
             }
         }
 
         return result;
+    }
+
+    private static void ExtractDefaultKeywords(ref string token, out bool isOptional, out bool isOverride)
+    {
+        isOptional = false;
+        isOverride = false;
+
+        string[] words = token.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length <= 1) return;
+
+        int idx = 0;
+        while (idx < words.Length - 1)
+        {
+            string kw = words[idx];
+            if (string.Equals(kw, "optional", StringComparison.OrdinalIgnoreCase))
+            {
+                isOptional = true;
+                idx++;
+            }
+            else if (string.Equals(kw, "override", StringComparison.OrdinalIgnoreCase))
+            {
+                isOverride = true;
+                idx++;
+            }
+            else
+            {
+                throw new ConfigSyntaxException($"Unsupported keyword '{kw}' in defaults list entry '{token}'.");
+            }
+        }
+
+        if (isOptional && isOverride)
+        {
+            throw new ConfigSyntaxException($"'optional' and 'override' keywords cannot be combined in defaults list entry '{token}'.");
+        }
+
+        token = string.Join(' ', words[idx..]);
     }
 
     /// <summary>

@@ -21,6 +21,7 @@ public class OmegaConfBuilder
 {
     private string _rootDir = Directory.GetCurrentDirectory();
     private string _entryFile = "config.yaml";
+    private readonly List<string> _searchPaths = [];
     private readonly Dictionary<string, string> _selectedPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _droppedGroups = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _cliArgs = [];
@@ -77,6 +78,39 @@ public class OmegaConfBuilder
     /// </summary>
     /// <param name="rootDir">Absolute or relative directory path.</param>
     public OmegaConfBuilder SetRoot(string rootDir) => SetRootDirectory(rootDir);
+
+    /// <summary>
+    /// Adds one or more secondary configuration search directories (similar to Hydra's <c>hydra.searchpath</c>).
+    /// When a config group or file is not found in the primary root directory, search paths are probed in registration order.
+    /// </summary>
+    /// <param name="paths">Additional configuration directory paths.</param>
+    public OmegaConfBuilder AddSearchPath(params string[] paths)
+    {
+        foreach (var p in paths)
+        {
+            if (!string.IsNullOrWhiteSpace(p))
+            {
+                _searchPaths.Add(p);
+            }
+        }
+        return this;
+    }
+
+    /// <summary>
+    /// Configures secondary configuration search directories (similar to Hydra's <c>hydra.searchpath</c>).
+    /// </summary>
+    /// <param name="paths">Collection of additional configuration directory paths.</param>
+    public OmegaConfBuilder WithSearchPaths(IEnumerable<string> paths)
+    {
+        foreach (var p in paths)
+        {
+            if (!string.IsNullOrWhiteSpace(p))
+            {
+                _searchPaths.Add(p);
+            }
+        }
+        return this;
+    }
 
     /// <summary>
     /// Sets the entrypoint configuration file name (defaults to <c>"config.yaml"</c>).
@@ -190,11 +224,11 @@ public class OmegaConfBuilder
     {
         // Stage 1: Separate CLI config-group selections (e.g. db=postgres, db@primary=postgres, ~db) from deep value overrides
         var remainingCliOverrides = new List<string>();
-        CliOverrideParser.ExtractGroupSelections(_cliArgs, _selectedPaths, _droppedGroups, remainingCliOverrides, _rootDir);
+        CliOverrideParser.ExtractGroupSelections(_cliArgs, _selectedPaths, _droppedGroups, remainingCliOverrides, _rootDir, _searchPaths);
 
         // Stage 2: Resolve directory tree composition, defaults list, @package directives, auto-cascading, and _inherits_
         var resolver = new TreeResolver(_registry);
-        var composedRoot = resolver.Resolve(_rootDir, _entryFile, _selectedPaths, _droppedGroups);
+        var composedRoot = resolver.Resolve(_rootDir, _entryFile, _selectedPaths, _droppedGroups, _searchPaths);
 
         if (_structMode)
         {
@@ -274,6 +308,7 @@ public class OmegaConfBuilder
             // Build an isolated configuration tree for this specific parameter combination
             var builder = new OmegaConfBuilder()
                 .SetRootDirectory(_rootDir)
+                .WithSearchPaths(_searchPaths)
                 .SetEntryFile(_entryFile)
                 .WithStructMode(_structMode)
                 .WithReadOnly(_readOnly)
@@ -367,6 +402,20 @@ public class OmegaConfBuilder<T>
 
     /// <inheritdoc cref="OmegaConfBuilder.SetRoot(string)"/>
     public OmegaConfBuilder<T> SetRoot(string rootDir) => SetRootDirectory(rootDir);
+
+    /// <inheritdoc cref="OmegaConfBuilder.AddSearchPath(string[])"/>
+    public OmegaConfBuilder<T> AddSearchPath(params string[] paths)
+    {
+        _inner.AddSearchPath(paths);
+        return this;
+    }
+
+    /// <inheritdoc cref="OmegaConfBuilder.WithSearchPaths(IEnumerable{string})"/>
+    public OmegaConfBuilder<T> WithSearchPaths(IEnumerable<string> paths)
+    {
+        _inner.WithSearchPaths(paths);
+        return this;
+    }
 
     /// <inheritdoc cref="OmegaConfBuilder.SetEntryFile(string)"/>
     public OmegaConfBuilder<T> SetEntryFile(string entryFile)

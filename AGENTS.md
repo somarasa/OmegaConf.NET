@@ -28,7 +28,7 @@ OmegaConf.NET/
 │   ├── OmegaConf.NET/                  # Core library (AST, Parsers, Operators, Resolvers, Binder)
 │   └── OmegaConf.NET.Extensions/       # Microsoft.Extensions.Configuration & DI provider
 ├── tests/
-│   └── OmegaConf.NET.Tests/            # Comprehensive unit and integration test suite (78 tests)
+│   └── OmegaConf.NET.Tests/            # Comprehensive unit and integration test suite (98 tests)
 └── samples/
     └── QuickStart/                     # Runnable sample console application
 ```
@@ -84,18 +84,19 @@ OmegaConf.NET/
 - Always use `OperatorParser.ParseKey(...)` to extract the operator and clean key.
 
 ### Composition & Cascading (`src/OmegaConf.NET/Composition/`)
-- **Config Groups**: Subdirectories under the root config directory (e.g. `db/`, `model/`, `env/`).
-- **Defaults List**: Top-level `defaults:` array in `config.yaml`.
+- **Config Groups & Search Paths**: Subdirectories under the root config directory (e.g. `db/`, `model/`, `env/`) and optional secondary search paths configured via `builder.AddSearchPath(...)` / `builder.WithSearchPaths(...)`.
+- **Defaults List**: Top-level `defaults:` array in `config.yaml` (and nested `defaults:` inside config group files), supporting `optional group: choice` and `override group: choice` keywords.
 - **Precedence with `_self_`**:
   - `_self_` at the end: Local file overrides defaults.
   - `_self_` at the start: Defaults override local file.
 - **Package Directives (`@package` & `# @package`)**:
-  - Supports `- db@primary_db: postgres`, `- experiment@_global_: fast`, CLI `+experiment@_global_=fast`, and `# @package _global_` file headers.
+  - Supports `- db@primary_db: postgres`, `- experiment@_global_: fast`, `- db@_group_.replica: postgres`, CLI `+experiment@_global_=fast`, and `# @package _global_` file headers.
 - **Auto-Cascading**: If a sub-config shares a filename with its parent folder(s) across one or multiple directory levels (e.g. `db/cloud/aws/postgres.yaml`, `db/cloud/postgres.yaml`, and `db/postgres.yaml`), parent bases are loaded and merged automatically from root to leaf.
 - **Explicit Inheritance**: `_inherits_: "../base.yaml"` or lists of files (including cross-format inheritance across YAML, JSON/JSONC, and TOML).
-- **Struct Mode & Deep CLI Modifiers**:
+- **Struct Mode, Deep CLI Modifiers & CLI Grammar Functions**:
   - `builder.WithStructMode()` / `node.SetStruct(true)` locks schema keys against typos (`ConfigStructException`).
-  - `+key=val` appends new keys; `++key=val` upserts keys; `~key.path` deletes deep keys or drops default groups.
+  - `+key=val` appends new keys; `++key=val` upserts keys; `~key.path`, `~items[0]`, `~items[-1]` deletes deep keys or list items; `~key=expected` performs conditional value-checked deletion.
+  - Supports bracket/negative list indexing (`a[0]=3`, `a[-1]=3`, `metrics[20s_labels]=42`), escaped missing literals (`\???`), and CLI functions `int()`, `float()`, `str()`, `bool()`, `sort([...][, reverse=true])`, and `extend_list(...)`.
 - **Cycle Prevention**: Circular dependencies throw `ConfigInheritanceException`.
 
 ### Variable Interpolation (`src/OmegaConf.NET/Interpolation/`)

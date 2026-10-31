@@ -19,6 +19,7 @@ public class TreeResolver
 
     private readonly ConfigFormatRegistry _registry;
     private readonly HashSet<string> _loadingStack = new(StringComparer.OrdinalIgnoreCase);
+    private List<string> _searchPaths = [];
 
     /// <summary>
     /// Initializes a new instance of the <see cref="TreeResolver"/> class.
@@ -30,19 +31,34 @@ public class TreeResolver
     }
 
     /// <summary>
-    /// Resolves and composes the configuration tree starting from <paramref name="rootDir"/> and <paramref name="entryFile"/>.
+    /// Resolves and composes the configuration tree starting from <paramref name="rootDir"/> (and any additional <paramref name="searchPaths"/>)
+    /// and <paramref name="entryFile"/>.
     /// </summary>
-    /// <param name="rootDir">The root configuration directory.</param>
+    /// <param name="rootDir">The primary root configuration directory.</param>
     /// <param name="entryFile">The entrypoint configuration filename (defaults to <c>"config.yaml"</c>).</param>
     /// <param name="selectedPaths">Optional config group path overrides supplied via builder or CLI.</param>
     /// <param name="droppedGroups">Optional config group names to exclude (e.g. <c>~db</c>).</param>
+    /// <param name="searchPaths">Optional secondary configuration directories searched in order when a file or group is not found in <paramref name="rootDir"/>.</param>
     /// <returns>The composed <see cref="ConfigObjectNode"/> prior to CLI value overrides and variable interpolation.</returns>
     public ConfigObjectNode Resolve(
         string rootDir,
         string entryFile = "config.yaml",
         IDictionary<string, string>? selectedPaths = null,
-        ISet<string>? droppedGroups = null)
+        ISet<string>? droppedGroups = null,
+        IEnumerable<string>? searchPaths = null)
     {
+        _searchPaths = [rootDir];
+        if (searchPaths != null)
+        {
+            foreach (var sp in searchPaths)
+            {
+                if (!string.IsNullOrWhiteSpace(sp) && !_searchPaths.Contains(sp, StringComparer.OrdinalIgnoreCase))
+                {
+                    _searchPaths.Add(sp);
+                }
+            }
+        }
+
         var activeSelections = selectedPaths != null
             ? new Dictionary<string, string>(selectedPaths, StringComparer.OrdinalIgnoreCase)
             : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -51,7 +67,7 @@ public class TreeResolver
             ? new HashSet<string>(droppedGroups, StringComparer.OrdinalIgnoreCase)
             : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        string fullEntryPath = FindConfigFile(rootDir, entryFile)
+        string fullEntryPath = FindConfigFileAcrossSearchPaths(entryFile)
             ?? throw new FileNotFoundException($"Entry configuration file '{entryFile}' not found in directory '{rootDir}'.");
 
         return LoadFileWithHierarchy(rootDir, fullEntryPath, activeSelections, activeDropped, isEntry: true);
@@ -59,7 +75,7 @@ public class TreeResolver
 
     /// <summary>
     /// Loads a single configuration file, resolves any explicit <c>_inherits_</c> base files,
-    /// and (if it is the entrypoint) processes its <c>defaults:</c> composition list.
+    /// and processes its <c>defaults:</c> composition list if present.
     /// Guards against circular inheritance using <see cref="_loadingStack"/>.
     /// </summary>
     private ConfigObjectNode LoadFileWithHierarchy(
@@ -86,16 +102,14 @@ public class TreeResolver
                 ? (ConfigObjectNode)OperatorEngine.Apply(baseNode, rawNode)
                 : rawNode;
 
-            if (!isEntry)
-            {
-                return currentNode;
-            }
-
-            // Step 2: If this is the entrypoint file, process its defaults list and config groups
+            // Step 2: Process defaults list if declared in this file (supported in both entrypoint and nested group files)
             var defaults = DefaultsListParser.Parse(currentNode);
 
-            // Also append any dynamically added CLI config groups (e.g. "+db@replica=sqlite" or "+experiment@_global_=exp1")
-            AppendDynamicSelectedGroups(rootDir, defaults, selectedPaths);
+            if (isEntry)
+            {
+                // Append any dynamically added CLI config groups (e.g. "+db@replica=sqlite" or "+experiment@_global_=exp1")
+                AppendDynamicSelectedGroups(defaults, selectedPaths);
+            }
 
             if (defaults.Count == 0)
             {
@@ -115,8 +129,7 @@ public class TreeResolver
     /// Appends any config groups requested via <paramref name="selectedPaths"/> (such as <c>+experiment@_global_=fast</c>
     /// or <c>db@analytics_db=postgres</c>) that are not already present in the entrypoint's <c>defaults:</c> list.
     /// </summary>
-    private static void AppendDynamicSelectedGroups(
-        string rootDir,
+    private void AppendDynamicSelectedGroups(
         List<DefaultsEntry> defaults,
         Dictionary<string, string> selectedPaths)
     {
@@ -131,7 +144,7 @@ public class TreeResolver
                 string.Equals(d.Group, group, StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(d.Package ?? "", pkg ?? "", StringComparison.OrdinalIgnoreCase));
 
-            if (!alreadyInDefaults && Directory.Exists(Path.Combine(rootDir, group)))
+            if (!alreadyInDefaults && _searchPaths.Any(sp => Directory.Exists(Path.Combine(sp, group))))
             {
                 defaults.Add(DefaultsEntry.GroupChoice(group, val, isOptional: false, package: pkg));
             }
@@ -141,15 +154,47 @@ public class TreeResolver
     /// <summary>
     /// Merges all entries in the <c>defaults:</c> list in order, respecting the position of <c>_self_</c>.
     /// Entries before <c>_self_</c> are overridden by the entry file; entries after <c>_self_</c> override the entry file.
+    /// Also resolves <c>override</c> entries (e.g. <c>- override db: mysql</c>).
     /// </summary>
     private ConfigObjectNode ProcessDefaultsList(
         string rootDir,
         string entryFilePath,
         ConfigObjectNode entryNode,
-        List<DefaultsEntry> defaults,
+        List<DefaultsEntry> rawDefaults,
         Dictionary<string, string> selectedPaths,
         HashSet<string> droppedGroups)
     {
+        // Normalize 'override' entries:
+        // 1. If an 'override' entry matches an earlier entry in the same defaults list, update that earlier entry in-place.
+        // 2. Also register 'override' entries in selectedPaths (if not already overridden by CLI) so nested defaults lists pick them up.
+        var defaults = new List<DefaultsEntry>();
+        foreach (var entry in rawDefaults)
+        {
+            if (entry.IsOverride && entry.Group != null)
+            {
+                if (!selectedPaths.ContainsKey(entry.SelectionKey) && entry.Path != null)
+                {
+                    selectedPaths[entry.SelectionKey] = entry.Path;
+                }
+
+                int existingIdx = defaults.FindIndex(d =>
+                    !d.IsSelf &&
+                    string.Equals(d.SelectionKey, entry.SelectionKey, StringComparison.OrdinalIgnoreCase));
+
+                if (existingIdx >= 0)
+                {
+                    defaults[existingIdx] = DefaultsEntry.GroupChoice(
+                        defaults[existingIdx].Group!,
+                        entry.Path ?? defaults[existingIdx].Group!,
+                        entry.IsOptional || defaults[existingIdx].IsOptional,
+                        entry.Package ?? defaults[existingIdx].Package);
+                    continue;
+                }
+            }
+
+            defaults.Add(entry);
+        }
+
         // Locate _self_ in the defaults list; if omitted, Hydra semantics place _self_ at the end
         int selfIndex = defaults.FindIndex(d => d.IsSelf);
         if (selfIndex < 0)
@@ -165,6 +210,7 @@ public class TreeResolver
         // 1. Apply defaults listed before _self_
         foreach (var entry in beforeSelf)
         {
+            if (entry.IsOverride && HasGroupAlreadyBeenMounted(composed, entry)) continue;
             ApplyDefaultEntry(composed, rootDir, entry, selectedPaths, droppedGroups);
         }
 
@@ -176,10 +222,22 @@ public class TreeResolver
         // 3. Apply defaults listed after _self_
         foreach (var entry in afterSelf)
         {
+            if (entry.IsOverride && HasGroupAlreadyBeenMounted(composed, entry)) continue;
             ApplyDefaultEntry(composed, rootDir, entry, selectedPaths, droppedGroups);
         }
 
         return composed;
+    }
+
+    private static bool HasGroupAlreadyBeenMounted(ConfigObjectNode composed, DefaultsEntry entry)
+    {
+        string targetPkg = entry.Package ?? entry.Group ?? "";
+        if (string.IsNullOrEmpty(targetPkg) || string.Equals(targetPkg, DefaultsEntry.GlobalPackage, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return composed.TryGetChild(targetPkg, out _);
     }
 
     /// <summary>
@@ -225,7 +283,16 @@ public class TreeResolver
         if (groupNode != null)
         {
             // Precedence for target package: explicit DefaultsEntry @package > file '# @package' header > group name
-            string targetPackage = entry.Package ?? filePackageHeader ?? entry.Group;
+            string targetPackage = entry.Package ?? filePackageHeader ?? entry.Group.Replace('/', '.');
+            if (targetPackage.Equals("_group_", StringComparison.OrdinalIgnoreCase))
+            {
+                targetPackage = entry.Group.Replace('/', '.');
+            }
+            else if (targetPackage.StartsWith("_group_.", StringComparison.OrdinalIgnoreCase))
+            {
+                targetPackage = entry.Group.Replace('/', '.') + targetPackage["_group_".Length..];
+            }
+
             MountPackageNode(target, targetPackage, groupNode);
         }
     }
@@ -279,8 +346,8 @@ public class TreeResolver
     }
 
     /// <summary>
-    /// Loads a config group file, automatically cascading down from parent directories that contain a file with the same name.
-    /// Also extracts any <c># @package</c> or <c>// @package</c> directive from the top of the leaf file.
+    /// Loads a config group file across the configured search paths, automatically cascading down from parent directories
+    /// that contain a file with the same name. Also extracts any <c># @package</c> or <c>// @package</c> directive from the top of the leaf file.
     /// </summary>
     private (ConfigObjectNode? Node, string? FilePackageHeader) ResolveGroupWithCascading(
         string rootDir,
@@ -290,14 +357,24 @@ public class TreeResolver
         Dictionary<string, string> selectedPaths,
         HashSet<string> droppedGroups)
     {
-        string groupDir = Path.Combine(rootDir, group);
+        string? resolvedFile = null;
+        string matchedGroupDir = Path.Combine(rootDir, group);
 
-        string? resolvedFile = FindConfigFile(groupDir, subPath);
+        foreach (var sp in _searchPaths)
+        {
+            string candidateGroupDir = Path.Combine(sp, group);
+            resolvedFile = FindConfigFile(candidateGroupDir, subPath);
+            if (resolvedFile != null)
+            {
+                matchedGroupDir = candidateGroupDir;
+                break;
+            }
+        }
 
         if (resolvedFile == null)
         {
             if (isOptional) return (null, null);
-            throw new FileNotFoundException($"Configuration file for group '{group}' at path '{subPath}' was not found in '{groupDir}'.");
+            throw new FileNotFoundException($"Configuration file for group '{group}' at path '{subPath}' was not found in '{matchedGroupDir}'.");
         }
 
         string? filePackageHeader = ExtractFilePackageHeader(resolvedFile);
@@ -308,9 +385,9 @@ public class TreeResolver
 
         if (!string.IsNullOrEmpty(relativeSubDir))
         {
-            // Walk from groupDir down through each intermediate subdirectory (excluding the leaf file itself)
+            // Walk from matchedGroupDir down through each intermediate subdirectory (excluding the leaf file itself)
             string[] subSegments = relativeSubDir.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
-            string currentCascadeDir = groupDir;
+            string currentCascadeDir = matchedGroupDir;
 
             for (int i = 0; i < subSegments.Length; i++)
             {
@@ -429,6 +506,20 @@ public class TreeResolver
 
                 return accumulatedBase;
             }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Searches for a configuration file across all registered search paths in priority order.
+    /// </summary>
+    private string? FindConfigFileAcrossSearchPaths(string filename)
+    {
+        foreach (var sp in _searchPaths)
+        {
+            var found = FindConfigFile(sp, filename);
+            if (found != null) return found;
         }
 
         return null;

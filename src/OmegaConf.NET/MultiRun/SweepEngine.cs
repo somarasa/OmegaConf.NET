@@ -130,9 +130,54 @@ public static class SweepEngine
                 expandedValues = ExpandGlob(key, inner, rootDir);
                 return true;
 
+            case "sort":
+                expandedValues = ExpandSortSweep(inner);
+                return true;
+
+            case "shuffle":
+                expandedValues = ExpandShuffleSweep(inner);
+                return true;
+
             default:
                 return false;
         }
+    }
+
+    private static List<string> ExpandSortSweep(string inner)
+    {
+        var parts = SplitTopLevelCommas(inner);
+        bool reverse = false;
+        if (parts.Count > 0 && parts[^1].Replace(" ", "").Equals("reverse=true", StringComparison.OrdinalIgnoreCase))
+        {
+            reverse = true;
+            parts.RemoveAt(parts.Count - 1);
+        }
+        else if (parts.Count > 0 && parts[^1].Replace(" ", "").Equals("reverse=false", StringComparison.OrdinalIgnoreCase))
+        {
+            parts.RemoveAt(parts.Count - 1);
+        }
+
+        if (parts.All(p => double.TryParse(p, NumberStyles.Float, CultureInfo.InvariantCulture, out _)))
+        {
+            parts.Sort((a, b) => double.Parse(a, CultureInfo.InvariantCulture).CompareTo(double.Parse(b, CultureInfo.InvariantCulture)));
+        }
+        else
+        {
+            parts.Sort(StringComparer.Ordinal);
+        }
+
+        if (reverse) parts.Reverse();
+        return parts;
+    }
+
+    private static List<string> ExpandShuffleSweep(string inner)
+    {
+        if (inner.StartsWith("choice(", StringComparison.OrdinalIgnoreCase) && inner.EndsWith(')'))
+        {
+            inner = inner["choice(".Length..^1].Trim();
+        }
+        var parts = SplitTopLevelCommas(inner);
+        return parts.OrderBy(_ => Random.Shared.Next()).ToList();
     }
 
     /// <summary>

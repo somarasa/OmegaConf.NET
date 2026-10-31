@@ -29,14 +29,70 @@ public static class ConfigBinder
     /// </summary>
     public const string PartialKey = "_partial_";
 
+    /// <summary>
+    /// Hydra-style key (<c>"_recursive_"</c>) used in configuration objects to control whether nested <c>_target_</c> objects are recursively instantiated.
+    /// </summary>
+    public const string RecursiveKey = "_recursive_";
+
     private static readonly MethodInfo CreateFactoryMethod =
         typeof(ConfigBinder).GetMethod(nameof(CreateTypedFactory), BindingFlags.NonPublic | BindingFlags.Static)!;
 
     /// <summary>
     /// Dynamically instantiates an object (or <see cref="Func{TResult}"/> factory when <c>_partial_: true</c>) from a configuration node containing <c>_target_</c>.
-    /// Equivalent to Python's <c>hydra.utils.instantiate(cfg)</c>.
+    /// Equivalent to Python's <c>hydra.utils.instantiate(cfg, **overrides)</c>.
     /// </summary>
-    public static T Instantiate<T>(ConfigNode node) => Bind<T>(node);
+    /// <typeparam name="T">The expected return type (or <see cref="object"/>).</typeparam>
+    /// <param name="node">The configuration node containing <c>_target_</c>.</param>
+    /// <param name="overrides">Optional call-site parameter overrides dictionary.</param>
+    public static T Instantiate<T>(ConfigNode node, IDictionary<string, object?>? overrides = null)
+    {
+        if (overrides == null || overrides.Count == 0 || node is not ConfigObjectNode objNode)
+        {
+            return Bind<T>(node);
+        }
+
+        var merged = (ConfigObjectNode)objNode.Clone();
+        foreach (var (k, v) in overrides)
+        {
+            merged.SetChild(k, ConvertOverrideToNode(v), allowNewKeyInStruct: true);
+        }
+        return Bind<T>(merged);
+    }
+
+    /// <summary>
+    /// Dynamically instantiates an object from a configuration node containing <c>_target_</c>,
+    /// applying call-site parameter overrides from an anonymous object (e.g. <c>new { Port = 9090 }</c>).
+    /// </summary>
+    /// <typeparam name="T">The expected return type (or <see cref="object"/>).</typeparam>
+    /// <param name="node">The configuration node containing <c>_target_</c>.</param>
+    /// <param name="anonymousOverrides">An object whose public readable properties override keys in <paramref name="node"/>.</param>
+    public static T Instantiate<T>(ConfigNode node, object anonymousOverrides)
+    {
+        if (anonymousOverrides is IDictionary<string, object?> dict)
+        {
+            return Instantiate<T>(node, dict);
+        }
+
+        var overrideDict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        if (anonymousOverrides != null)
+        {
+            foreach (var prop in anonymousOverrides.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (prop.CanRead)
+                {
+                    overrideDict[prop.Name] = prop.GetValue(anonymousOverrides);
+                }
+            }
+        }
+        return Instantiate<T>(node, overrideDict);
+    }
+
+    private static ConfigNode ConvertOverrideToNode(object? value)
+    {
+        if (value is ConfigNode cn) return cn.Clone();
+        if (value is int i) return new ConfigValueNode((long)i);
+        return new ConfigValueNode(value);
+    }
 
     /// <summary>
     /// Binds a <see cref="ConfigNode"/> to a strongly typed C# instance of <typeparamref name="T"/>.
@@ -56,22 +112,53 @@ public static class ConfigBinder
     /// <param name="currentPath">Dot-separated configuration path used for diagnostic error reporting.</param>
     public static object Bind(ConfigNode node, Type targetType, string currentPath = "")
     {
-        // 0. Handle Func<TResult> factory delegate (Hydra _partial_ / lazy factory instantiation)
+        // 0. Handle raw ConfigNode / ConfigObjectNode / ConfigListNode passthrough
+        if (typeof(ConfigNode).IsAssignableFrom(targetType))
+        {
+            return node.Clone();
+        }
+
+        // 0a. Handle Func<TResult> factory delegate (Hydra _partial_ / lazy factory instantiation)
         if (targetType.IsGenericType && targetType.GetGenericTypeDefinition() == typeof(Func<>))
         {
             Type resultType = targetType.GetGenericArguments()[0];
             return CreateFactoryMethod.MakeGenericMethod(resultType).Invoke(null, [node.Clone(), currentPath])!;
         }
 
-        // If targetType is System.Object and the config node specifies _partial_: true, return a Func<object> factory
-        if (targetType == typeof(object) &&
-            node is ConfigObjectNode partialObj &&
-            partialObj.TryGetChild(PartialKey, out var partialVal) &&
-            partialVal is ConfigValueNode { Value: true })
+        // 0b. Handle System.Object targetType (untyped dynamic values, lists, dictionaries, or _target_ objects)
+        if (targetType == typeof(object))
         {
-            var clonedWithoutPartial = (ConfigObjectNode)partialObj.Clone();
-            clonedWithoutPartial.RemoveChild(PartialKey);
-            return new Func<object>(() => BindObject(clonedWithoutPartial, typeof(object), currentPath));
+            if (node is ConfigValueNode objVn)
+            {
+                if (objVn.IsMissingMarker)
+                {
+                    throw new MissingValueMarkerException(currentPath, objVn.Source);
+                }
+                return objVn.Value!;
+            }
+
+            if (node is ConfigListNode)
+            {
+                return BindList(node, typeof(List<object>), typeof(object), currentPath);
+            }
+
+            if (node is ConfigObjectNode dynObj)
+            {
+                if (dynObj.TryGetChild(PartialKey, out var partialVal) &&
+                    partialVal is ConfigValueNode { Value: true })
+                {
+                    var clonedWithoutPartial = (ConfigObjectNode)dynObj.Clone();
+                    clonedWithoutPartial.RemoveChild(PartialKey);
+                    return new Func<object>(() => Bind(clonedWithoutPartial, typeof(object), currentPath));
+                }
+
+                if (dynObj.TryGetChild(TargetKey, out _))
+                {
+                    return BindObject(dynObj, typeof(object), currentPath);
+                }
+
+                return BindDictionary(dynObj, typeof(Dictionary<string, object>), typeof(string), typeof(object), currentPath);
+            }
         }
 
         // 1. Handle Nullable<T> value types
@@ -220,16 +307,25 @@ public static class ConfigBinder
         Type concreteType = targetType;
         if (objNode.TryGetChild(TargetKey, out var targetValNode) && targetValNode is ConfigValueNode tvn && tvn.Value is string targetTypeName)
         {
-            var resolvedType = Type.GetType(targetTypeName, throwOnError: false);
+            var resolvedType = ResolveTargetType(targetTypeName);
             if (resolvedType != null && targetType.IsAssignableFrom(resolvedType))
             {
                 concreteType = resolvedType;
             }
         }
 
+        // Check for Hydra _recursive_: false directive
+        bool isRecursive = true;
+        if (objNode.TryGetChild(RecursiveKey, out var recNode) && recNode is ConfigValueNode { Value: false })
+        {
+            isRecursive = false;
+        }
+
+        ConfigObjectNode effectiveObjNode = isRecursive ? objNode : CreateNonRecursiveCopy(objNode);
+
         // Instantiate via parameterless constructor (POCO) or parameterized primary constructor (positional record)
         var boundParameterNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        object instance = CreateInstanceOrRecord(concreteType, objNode, currentPath, boundParameterNames);
+        object instance = CreateInstanceOrRecord(concreteType, effectiveObjNode, currentPath, boundParameterNames);
 
         // Bind remaining writable properties that were not already populated by a primary constructor
         var properties = concreteType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
@@ -246,7 +342,7 @@ public static class ConfigBinder
             bool isRequired = prop.GetCustomAttribute<ConfigRequiredAttribute>() != null;
 
             var explicitKey = prop.GetCustomAttribute<ConfigKeyAttribute>()?.Key;
-            ConfigNode? childNode = FindMatchingChild(objNode, prop.Name, explicitKey);
+            ConfigNode? childNode = FindMatchingChild(effectiveObjNode, prop.Name, explicitKey);
 
             if (childNode != null)
             {
@@ -277,6 +373,49 @@ public static class ConfigBinder
     private static Func<TResult> CreateTypedFactory<TResult>(ConfigNode clonedNode, string currentPath)
     {
         return () => (TResult)Bind(clonedNode.Clone(), typeof(TResult), currentPath);
+    }
+
+    private static Type? ResolveTargetType(string targetTypeName)
+    {
+        var type = Type.GetType(targetTypeName, throwOnError: false);
+        if (type != null) return type;
+
+        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            type = asm.GetType(targetTypeName, throwOnError: false, ignoreCase: false);
+            if (type != null) return type;
+        }
+
+        return null;
+    }
+
+    private static ConfigObjectNode CreateNonRecursiveCopy(ConfigObjectNode source)
+    {
+        var copy = (ConfigObjectNode)source.Clone();
+        foreach (var (_, child) in copy.Children)
+        {
+            StripRecursiveTargets(child);
+        }
+        return copy;
+    }
+
+    private static void StripRecursiveTargets(ConfigNode node)
+    {
+        if (node is ConfigObjectNode obj)
+        {
+            obj.RemoveChild(TargetKey);
+            foreach (var (_, child) in obj.Children)
+            {
+                StripRecursiveTargets(child);
+            }
+        }
+        else if (node is ConfigListNode list)
+        {
+            foreach (var item in list.Items)
+            {
+                StripRecursiveTargets(item);
+            }
+        }
     }
 
     /// <summary>

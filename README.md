@@ -324,47 +324,51 @@ builder.RegisterResolver("slugify", raw => raw.ToLowerInvariant().Replace(' ', '
 
 ## 📦 Advanced Hydra & OmegaConf Features
 
-### 1. Package Directives (`@package`, `@_global_`, and `# @package` Headers)
-Mount the same config group multiple times under different namespaces or merge a config group directly into the root:
+### 1. Package Directives (`@package`, `@_global_`, `@_group_`, `override`, and `# @package` Headers)
+Mount the same config group multiple times under different namespaces, override earlier defaults in-place, or merge a config group directly into the root:
 ```yaml
 defaults:
   - db@primary_db: postgres       # Mounts db/postgres.yaml under 'primary_db'
-  - db@replica_db: sqlite         # Mounts db/sqlite.yaml under 'replica_db'
+  - db@_group_.replica: sqlite    # Expands _group_ -> db, mounting under 'db.replica'
+  - override db@primary_db: mysql # Replaces primary_db's selection in-place
   - experiment@_global_: fast     # Merges experiment/fast.yaml directly into root
   - _self_
 ```
-You can also place `# @package _global_` (or `# @package custom.path`) at the top of a config file, or override packages from the CLI (`+experiment@_global_=fast`).
+You can also place `# @package _global_` (or `# @package custom.path`) at the top of a config file, compose across multiple directories with `.AddSearchPath("shared_configs")`, or override packages from the CLI (`+experiment@_global_=fast`).
 
-### 2. Rich Multi-Run Sweep Generators (`range`, `linspace`, `choice`, `glob`)
+### 2. Rich Multi-Run Sweep Generators (`range`, `linspace`, `choice`, `glob`, `sort`, `shuffle`)
 Run hyperparameter or multi-environment sweeps using `-m` / `--multirun`:
 ```bash
-dotnet run -- -m db=glob(*) workers=range(2,8,2) lr=linspace(0.01,0.1,5) tags=choice([a,b],[c,d])
+dotnet run -- -m db=glob(*) workers=range(2,8,2) lr=linspace(0.01,0.1,5) seed=sort(30,10,20) tags=choice([a,b],[c,d])
 ```
 
-### 3. Strict Struct Mode (`WithStructMode()`), `+key` / `++key` & Deep Deletion (`~key.path`)
-Catch command-line typos before they silently create invalid keys:
+### 3. Strict Struct Mode (`WithStructMode()`), `+key` / `++key`, CLI Grammar Functions & Deep Deletion (`~key.path`)
+Catch command-line typos before they silently create invalid keys, index or delete list items (`items[-1]=99`, `~items[0]=1`), escape `???` literals (`\???`), and use CLI grammar functions (`int()`, `float()`, `str()`, `bool()`, `sort()`, `extend_list()`):
 ```csharp
 var node = OmegaConfBuilder.Create()
     .SetRoot("configs")
+    .AddSearchPath("shared_plugin_configs")
     .WithStructMode()       // Throws ConfigStructException on undeclared keys
     .WithReadOnly()         // Freezes resolved AST against post-build mutation
     .WithOutputDirectory("outputs/${now:yyyy-MM-dd}") // Saves .omegaconf/config.yaml & overrides.yaml
     .AddCliArgs(
-        "~db.secret_token", // Deletes nested property
-        "+db.pool_size=20", // Explicitly appends a new key
-        "++db.port=5433"    // Safe upsert (overrides or creates)
+        "~db.secret_token",          // Deletes nested property
+        "~items[-1]=deprecated",     // Conditional value-checked deletion
+        "+db.pool_size=int(20)",     // Explicitly appends a new key with int() cast
+        "++db.port=5433",            // Safe upsert (overrides or creates)
+        "tags=extend_list(prod,gpu)" // Extends an existing list in-place
     )
     .BuildNode();
 ```
 
-### 4. Programmatic `OmegaConfig` Facade & `_args_` / `_partial_` Instantiation
+### 4. Programmatic `OmegaConfig` Facade & Recursive `_target_` / `_args_` / `_partial_` Instantiation
 ```csharp
 // Merge inline or file-backed configs and safely query with Select<T>
 var merged = OmegaConfig.Merge(OmegaConfig.ParseYaml(yaml), OmegaConfig.ParseJson(json));
 int port = OmegaConfig.Select(merged, "db.port", 5432);
 
-// Dynamic instantiation with _target_, positional _args_, or lazy Func<T> factories (_partial_)
-var client = OmegaConfig.Instantiate<IEndpointClient>(merged.SelectNode("client")!);
+// Dynamic instantiation with _target_, positional _args_, _recursive_: false, call-site overrides, or lazy Func<T> factories (_partial_)
+var client = OmegaConfig.Instantiate<IEndpointClient>(merged.SelectNode("client")!, new { port = 9090 });
 var factory = OmegaConfig.Instantiate<Func<IEndpointClient>>(merged.SelectNode("client")!);
 ```
 

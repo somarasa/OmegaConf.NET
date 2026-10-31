@@ -435,11 +435,21 @@ public class InterpolationEngine : IInterpolationContext
                     if (closeIdx < 0) return null;
 
                     string idxStr = indicesPart[1..closeIdx].Trim();
-                    if (!int.TryParse(idxStr, out int index)) return null;
-
-                    if (current is ConfigListNode listNode && index >= 0 && index < listNode.Items.Count)
+                    if (int.TryParse(idxStr, out int index) && current is ConfigListNode listNode)
                     {
-                        current = listNode.Items[index];
+                        int actualIdx = index < 0 ? listNode.Items.Count + index : index;
+                        if (actualIdx >= 0 && actualIdx < listNode.Items.Count)
+                        {
+                            current = listNode.Items[actualIdx];
+                        }
+                        else
+                        {
+                            return null;
+                        }
+                    }
+                    else if (current is ConfigObjectNode bracketObj && bracketObj.TryGetChild(idxStr, out var dictChild))
+                    {
+                        current = dictChild!;
                     }
                     else
                     {
@@ -449,12 +459,13 @@ public class InterpolationEngine : IInterpolationContext
                     indicesPart = indicesPart[(closeIdx + 1)..];
                 }
             }
-            // Case 2: Dot list indexing (e.g. "servers.0")
+            // Case 2: Dot list indexing (e.g. "servers.0" or "servers.-1")
             else if (current is ConfigListNode directList && int.TryParse(part, out int directIdx))
             {
-                if (directIdx >= 0 && directIdx < directList.Items.Count)
+                int actualIdx = directIdx < 0 ? directList.Items.Count + directIdx : directIdx;
+                if (actualIdx >= 0 && actualIdx < directList.Items.Count)
                 {
-                    current = directList.Items[directIdx];
+                    current = directList.Items[actualIdx];
                 }
                 else
                 {

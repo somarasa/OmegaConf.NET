@@ -87,6 +87,21 @@ public static class OmegaConfig
         ConfigBinder.Instantiate<T>(node);
 
     /// <summary>
+    /// Dynamically instantiates an object from a configuration node containing <c>_target_</c>,
+    /// applying call-site parameter overrides from a dictionary.
+    /// Equivalent to Python's <c>hydra.utils.instantiate(cfg, **overrides)</c>.
+    /// </summary>
+    public static T Instantiate<T>(ConfigNode node, IDictionary<string, object?>? overrides) =>
+        ConfigBinder.Instantiate<T>(node, overrides);
+
+    /// <summary>
+    /// Dynamically instantiates an object from a configuration node containing <c>_target_</c>,
+    /// applying call-site parameter overrides from an anonymous object (e.g. <c>new { Port = 9090 }</c>).
+    /// </summary>
+    public static T Instantiate<T>(ConfigNode node, object anonymousOverrides) =>
+        ConfigBinder.Instantiate<T>(node, anonymousOverrides);
+
+    /// <summary>
     /// Parses an inline YAML string into a <see cref="ConfigObjectNode"/>.
     /// </summary>
     public static ConfigObjectNode ParseYaml(string yamlContent) =>

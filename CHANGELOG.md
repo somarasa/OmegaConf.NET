@@ -8,11 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2026-10-31
 
 ### Added
-- **Hierarchical Tree Composition & Package Directives**: Hydra-style `defaults:` lists, Config Groups, `@package` and `@_global_` mounting directives, `# @package` file headers, optional defaults (`optional group: file`), and `_self_` precedence control.
+- **Hierarchical Tree Composition & Package Directives**: Hydra-style `defaults:` lists (in both entrypoint and nested config group files), Config Groups, multi-directory search paths (`AddSearchPath` / `WithSearchPaths`), `@package`, `@_global_`, `@_group_` / `@_group_.suffix` mounting directives, `# @package` file headers, `override group: file` and `optional group: file` keywords, and `_self_` precedence control.
 - **Multi-Level Auto-Cascading & Explicit Inheritance**: Automatic parent cascading across directory hierarchies (e.g. `db/postgres.yaml` -> `db/cloud/postgres.yaml` -> `db/cloud/aws/postgres.yaml`) and explicit `_inherits_` / `_base_` support across formats.
-- **In-Config & CLI Mutation Operators + Struct Mode**:
+- **In-Config & CLI Mutation Operators, Grammar Functions & Struct Mode**:
   - Key-suffix and CLI operators `=`, `+=`, `-=`, `*=`, `/=`, `&=`, `|=`, and `!=` across numbers, strings, booleans, lists, and objects.
-  - Strict Struct Mode (`WithStructMode()` / `SetStruct()`), `+key=val` strict append, `++key=val` safe upsert, and `~key.path` deep property deletion.
+  - Strict Struct Mode (`WithStructMode()` / `SetStruct()`), `+key=val` strict append, `++key=val` safe upsert, `~key.path` / `~items[0]` / `~items[-1]` deep property and list element deletion, and conditional value-checked deletion (`~key=expected`, `~key=???`, `~key=\???`).
+  - Hydra CLI grammar functions: `int()`, `float()`, `str()`, `bool()`, `sort([...][, reverse=true])`, `shuffle(...)`, and `extend_list(...)`.
+  - Escaped missing literal support (`\???` -> literal `"???"` vs `???` mandatory missing value marker).
 - **Multi-Format Parsing, Serialization & Programmatic AST API**:
   - Built-in support for YAML (`.yaml`, `.yml`), JSON / JSONC (`.json`, `.jsonc` with comments and trailing commas), and TOML (`.toml`), plus `.ToYaml()`, `.ToJson()`, and `.ToToml()` serialization.
   - `OmegaConfig` static facade (`Merge`, `Select`, `SetReadOnly` / `Freeze`, `SetStruct`, `Instantiate`, `ParseYaml`, `ParseJson`, `ParseToml`).
