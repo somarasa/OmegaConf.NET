@@ -28,7 +28,7 @@ OmegaConf.NET/
 │   ├── OmegaConf.NET/                  # Core library (AST, Parsers, Operators, Resolvers, Binder)
 │   └── OmegaConf.NET.Extensions/       # Microsoft.Extensions.Configuration & DI provider
 ├── tests/
-│   └── OmegaConf.NET.Tests/            # Comprehensive unit and integration test suite (71 tests)
+│   └── OmegaConf.NET.Tests/            # Comprehensive unit and integration test suite (78 tests)
 └── samples/
     └── QuickStart/                     # Runnable sample console application
 ```
@@ -89,20 +89,29 @@ OmegaConf.NET/
 - **Precedence with `_self_`**:
   - `_self_` at the end: Local file overrides defaults.
   - `_self_` at the start: Defaults override local file.
+- **Package Directives (`@package` & `# @package`)**:
+  - Supports `- db@primary_db: postgres`, `- experiment@_global_: fast`, CLI `+experiment@_global_=fast`, and `# @package _global_` file headers.
 - **Auto-Cascading**: If a sub-config shares a filename with its parent folder(s) across one or multiple directory levels (e.g. `db/cloud/aws/postgres.yaml`, `db/cloud/postgres.yaml`, and `db/postgres.yaml`), parent bases are loaded and merged automatically from root to leaf.
 - **Explicit Inheritance**: `_inherits_: "../base.yaml"` or lists of files (including cross-format inheritance across YAML, JSON/JSONC, and TOML).
+- **Struct Mode & Deep CLI Modifiers**:
+  - `builder.WithStructMode()` / `node.SetStruct(true)` locks schema keys against typos (`ConfigStructException`).
+  - `+key=val` appends new keys; `++key=val` upserts keys; `~key.path` deletes deep keys or drops default groups.
 - **Cycle Prevention**: Circular dependencies throw `ConfigInheritanceException`.
 
 ### Variable Interpolation (`src/OmegaConf.NET/Interpolation/`)
-- **Native Type Preservation**: Pure single-variable interpolations `${port}` preserve `int`/`bool` types.
+- **Native Type Preservation**: Pure single-variable interpolations `${port}` preserve `int`/`bool` types; standalone node interpolations replace the leaf node in the AST.
 - **List Element Indexing**: Supports both bracket (`${servers[0]}`) and dot (`${servers.0}`) indexing.
 - **Relative Dot Navigation**:
   - `.sibling`: Resolves in the same enclosing object container.
   - `..parent`: Resolves one container level up.
 - **Literal Escaping**: `\${...}` is preserved as unescaped `${...}` and not evaluated.
 - **Resolvers**:
-  - `${env:VAR, fallback}`: Environment variables.
+  - `${env:VAR, fallback}` & `${oc.env:VAR, fallback}`: Environment variables.
   - `${eval: 10 * 20}`: Built-in math, logic, comparison, and parentheses evaluator.
+  - `${now:yyyy-MM-dd}`: Current timestamp formatter.
+  - `${oc.select:path.to.key, fallback}`: Safe path lookup returning `null` or typed fallback when absent.
+  - `${oc.decode:raw_str}`: Decodes strings into native scalars, `ConfigListNode`, or `ConfigObjectNode`.
+  - `${oc.dict.keys:path.to.map}`: Extracts mapping keys as a `ConfigListNode`.
   - Custom resolvers registered via `builder.RegisterResolver(...)` (including nested interpolations like `${slugify:${app_name}}`).
 - **Cycle Prevention**: Circular references throw `ConfigInterpolationException`.
 
@@ -113,7 +122,7 @@ OmegaConf.NET/
   - `[ConfigRequired]`: Throws `MissingRequiredConfigException` if property is absent or `???`.
   - `[ConfigKey("custom")]`: Custom key alias.
   - `[ConfigIgnore]`: Skips property during binding.
-- **Dynamic Instantiation**: `_target_: "Namespace.Type, Assembly"` allows dynamic instantiation via reflection.
+- **Dynamic & Partial Instantiation**: `_target_: "Namespace.Type, Assembly"` with optional `_args_: [...]` positional constructor arguments and `Func<T>` / `_partial_: true` factory delegate binding via `OmegaConfig.Instantiate<T>(node)`.
 
 ---
 
@@ -121,8 +130,8 @@ OmegaConf.NET/
 
 1. **Multi-Run / Sweeps (`SweepEngine`)**:
    - Detects `-m` or `--multirun` in CLI args.
-   - Computes Cartesian product of comma-separated arguments (e.g. `db=stage,prod workers=2,4`) while preserving bracketed list literals (`tags=[a,b,c]`).
-   - Generates all permutations via `.BuildSweeps<T>()` and `.BuildSweepNodes()`.
+   - Computes Cartesian product across comma-separated arguments (`db=stage,prod`), `range(start, stop[, step])`, `linspace(start, end, count)` / `interval(start, end[, count])`, `choice(...)`, and `glob(pattern)` file discovery while preserving bracketed list literals (`tags=[a,b,c]`).
+   - Generates all permutations via `.BuildSweeps<T>()` and `.BuildSweepNodes()`, and writes reproducible `.omegaconf/config.yaml`, `.omegaconf/overrides.yaml`, and `multirun.yaml` snapshots when `.WithOutputDirectory(...)` is configured.
 
 2. **Config Differ (`ConfigDiffer`)**:
    - Hierarchically compares two nodes and reports additions (`+`), removals (`-`), and modifications (`~`).

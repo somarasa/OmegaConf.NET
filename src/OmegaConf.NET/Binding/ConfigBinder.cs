@@ -20,9 +20,28 @@ public static class ConfigBinder
     public const string TargetKey = "_target_";
 
     /// <summary>
+    /// Hydra-style key (<c>"_args_"</c>) used in configuration objects to pass positional constructor arguments during instantiation.
+    /// </summary>
+    public const string ArgsKey = "_args_";
+
+    /// <summary>
+    /// Hydra-style key (<c>"_partial_"</c>) used in configuration objects to indicate lazy/partial factory instantiation (<see cref="Func{TResult}"/>).
+    /// </summary>
+    public const string PartialKey = "_partial_";
+
+    private static readonly MethodInfo CreateFactoryMethod =
+        typeof(ConfigBinder).GetMethod(nameof(CreateTypedFactory), BindingFlags.NonPublic | BindingFlags.Static)!;
+
+    /// <summary>
+    /// Dynamically instantiates an object (or <see cref="Func{TResult}"/> factory when <c>_partial_: true</c>) from a configuration node containing <c>_target_</c>.
+    /// Equivalent to Python's <c>hydra.utils.instantiate(cfg)</c>.
+    /// </summary>
+    public static T Instantiate<T>(ConfigNode node) => Bind<T>(node);
+
+    /// <summary>
     /// Binds a <see cref="ConfigNode"/> to a strongly typed C# instance of <typeparamref name="T"/>.
     /// </summary>
-    /// <typeparam name="T">Target C# class, struct, or positional record type.</typeparam>
+    /// <typeparam name="T">Target C# class, struct, positional record, or <see cref="Func{TResult}"/> factory type.</typeparam>
     /// <param name="node">The resolved AST node to bind from.</param>
     public static T Bind<T>(ConfigNode node)
     {
@@ -37,6 +56,24 @@ public static class ConfigBinder
     /// <param name="currentPath">Dot-separated configuration path used for diagnostic error reporting.</param>
     public static object Bind(ConfigNode node, Type targetType, string currentPath = "")
     {
+        // 0. Handle Func<TResult> factory delegate (Hydra _partial_ / lazy factory instantiation)
+        if (targetType.IsGenericType && targetType.GetGenericTypeDefinition() == typeof(Func<>))
+        {
+            Type resultType = targetType.GetGenericArguments()[0];
+            return CreateFactoryMethod.MakeGenericMethod(resultType).Invoke(null, [node.Clone(), currentPath])!;
+        }
+
+        // If targetType is System.Object and the config node specifies _partial_: true, return a Func<object> factory
+        if (targetType == typeof(object) &&
+            node is ConfigObjectNode partialObj &&
+            partialObj.TryGetChild(PartialKey, out var partialVal) &&
+            partialVal is ConfigValueNode { Value: true })
+        {
+            var clonedWithoutPartial = (ConfigObjectNode)partialObj.Clone();
+            clonedWithoutPartial.RemoveChild(PartialKey);
+            return new Func<object>(() => BindObject(clonedWithoutPartial, typeof(object), currentPath));
+        }
+
         // 1. Handle Nullable<T> value types
         var underlyingType = Nullable.GetUnderlyingType(targetType);
         if (underlyingType != null)
@@ -237,9 +274,16 @@ public static class ConfigBinder
         return instance;
     }
 
+    private static Func<TResult> CreateTypedFactory<TResult>(ConfigNode clonedNode, string currentPath)
+    {
+        return () => (TResult)Bind(clonedNode.Clone(), typeof(TResult), currentPath);
+    }
+
     /// <summary>
-    /// Creates an instance of <paramref name="concreteType"/>. Uses the parameterless constructor if available;
-    /// otherwise binds arguments to the public constructor with the most parameters (supporting C# positional records).
+    /// Creates an instance of <paramref name="concreteType"/>:
+    /// - If <c>_args_</c> is present in <paramref name="objNode"/>, binds positional constructor arguments from <c>_args_</c> (and any remaining parameters by name).
+    /// - Otherwise uses the parameterless constructor if available;
+    /// - Otherwise binds arguments to the public constructor with the most parameters (supporting C# positional records).
     /// </summary>
     private static object CreateInstanceOrRecord(
         Type concreteType,
@@ -248,28 +292,53 @@ public static class ConfigBinder
         HashSet<string> boundParameterNames)
     {
         var constructors = concreteType.GetConstructors(BindingFlags.Public | BindingFlags.Instance);
-        var defaultCtor = constructors.FirstOrDefault(c => c.GetParameters().Length == 0);
-        if (defaultCtor != null)
+
+        // Check for Hydra _args_: [arg0, arg1, ...] positional constructor arguments
+        ConfigListNode? positionalArgsList = null;
+        if (objNode.TryGetChild(ArgsKey, out var rawArgsNode) && rawArgsNode is ConfigListNode listNode && listNode.Items.Count > 0)
         {
-            try
+            positionalArgsList = listNode;
+        }
+
+        if (positionalArgsList == null)
+        {
+            var defaultCtor = constructors.FirstOrDefault(c => c.GetParameters().Length == 0);
+            if (defaultCtor != null)
             {
-                return Activator.CreateInstance(concreteType)
-                    ?? throw new InvalidOperationException($"Could not instantiate type '{concreteType.FullName}'.");
-            }
-            catch (Exception ex)
-            {
-                throw new InvalidOperationException($"Failed to create instance of type '{concreteType.FullName}': {ex.Message}", ex);
+                try
+                {
+                    return Activator.CreateInstance(concreteType)
+                        ?? throw new InvalidOperationException($"Could not instantiate type '{concreteType.FullName}'.");
+                }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException($"Failed to create instance of type '{concreteType.FullName}': {ex.Message}", ex);
+                }
             }
         }
 
-        // Fallback to primary / parameterized constructor for positional records
-        var primaryCtor = constructors.OrderByDescending(c => c.GetParameters().Length).FirstOrDefault();
-        if (primaryCtor == null)
+        // Select best matching parameterized constructor
+        ConstructorInfo? targetCtor;
+        if (positionalArgsList != null)
         {
-            throw new InvalidOperationException($"No public constructor found for type '{concreteType.FullName}'.");
+            int posCount = positionalArgsList.Items.Count;
+            targetCtor = constructors
+                .Where(c => c.GetParameters().Length >= posCount)
+                .OrderBy(c => c.GetParameters().Length == posCount ? 0 : 1)
+                .ThenByDescending(c => c.GetParameters().Length)
+                .FirstOrDefault();
+        }
+        else
+        {
+            targetCtor = constructors.OrderByDescending(c => c.GetParameters().Length).FirstOrDefault();
         }
 
-        var parameters = primaryCtor.GetParameters();
+        if (targetCtor == null)
+        {
+            throw new InvalidOperationException($"No matching public constructor found for type '{concreteType.FullName}'.");
+        }
+
+        var parameters = targetCtor.GetParameters();
         var args = new object?[parameters.Length];
 
         for (int i = 0; i < parameters.Length; i++)
@@ -278,7 +347,19 @@ public static class ConfigBinder
             string paramName = param.Name ?? $"arg{i}";
             string paramPath = string.IsNullOrEmpty(currentPath) ? paramName : $"{currentPath}.{paramName}";
 
-            // Check attributes on both the constructor parameter and its corresponding synthesized property
+            // 1. If covered by positional _args_, bind from _args_[i]
+            if (positionalArgsList != null && i < positionalArgsList.Items.Count)
+            {
+                args[i] = Bind(positionalArgsList.Items[i], param.ParameterType, $"{currentPath}._args_[{i}]");
+                // Only mark as bound if not explicitly overridden by a named property in objNode
+                if (FindMatchingChild(objNode, paramName) == null)
+                {
+                    boundParameterNames.Add(paramName);
+                }
+                continue;
+            }
+
+            // 2. Otherwise bind constructor parameter by name/attribute from objNode
             var matchingProp = concreteType.GetProperty(paramName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
             var explicitKey = param.GetCustomAttribute<ConfigKeyAttribute>()?.Key
                               ?? matchingProp?.GetCustomAttribute<ConfigKeyAttribute>()?.Key;
@@ -317,7 +398,7 @@ public static class ConfigBinder
             }
         }
 
-        return primaryCtor.Invoke(args);
+        return targetCtor.Invoke(args);
     }
 
     /// <summary>

@@ -43,10 +43,12 @@ Always declare the `defaults:` list in your entrypoint file:
 
 ```yaml
 defaults:
-  - db: staging/postgres      # Resolves db/postgres.yaml -> db/staging/postgres.yaml
+  - db: staging/postgres        # Resolves db/postgres.yaml -> db/staging/postgres.yaml
+  - db@replica_db: sqlite       # Mounts db/sqlite.yaml under 'replica_db' (@package directive)
+  - experiment@_global_: fast   # Merges experiment/fast.yaml directly into root (@_global_)
   - model: fast
-  - optional secrets: local   # Gracefully ignored if local.yaml doesn't exist
-  - _self_                    # Determines precedence of local settings below
+  - optional secrets: local     # Gracefully ignored if local.yaml doesn't exist
+  - _self_                      # Determines precedence of local settings below
 
 app_name: "CatalogService"
 active_workers: 4
@@ -139,9 +141,13 @@ timeout_calc: "${eval: 10 + 5 * 2}"                 # -> 20
 is_scaled: "${eval: ${batch_size} >= 64}"           # -> False
 ```
 
-### Environment Variables
+### Environment Variables & Built-In `oc.*` / `now` Resolvers
 ```yaml
 db_pass: "${env:DATABASE_PASSWORD, secret_dev_pw}"
+safe_port: "${oc.select:db.port, 5432}"
+decoded_port: "${oc.decode:${oc.env:PORT_STR, 8080}}"
+db_keys: "${oc.dict.keys:db}"
+run_dir: "outputs/${now:yyyy-MM-dd}"
 ```
 
 ### Mandatory Missing Marker (`???`)
@@ -213,17 +219,23 @@ AppConfig config = OmegaConfBuilder.Create<AppConfig>()
     .Build();
 ```
 
-### CLI Overrides Syntax
-CLI arguments passed to `.AddCliArgs(args)` can override paths, drop groups, or mutate deep values:
+### CLI Overrides, Struct Mode & Multi-Run Sweep Generators
+CLI arguments passed to `.AddCliArgs(args)` can override paths, redirect `@package`, drop groups/keys (`~`), enforce Struct Mode (`+` / `++`), or run parameter sweeps (`-m`):
 ```bash
-# Select path
-dotnet run -- db=production/postgres
+# Select path or @package target
+dotnet run -- db=production/postgres +experiment@_global_=fast
 
-# Drop default group (Hydra tilde syntax)
-dotnet run -- ~db
+# Drop default group or delete a deep key (Hydra tilde syntax)
+dotnet run -- ~db ~server.secret_token
+
+# Struct mode additions (+key fails if key exists; ++key upserts safely)
+dotnet run -- +db.pool_size=20 ++db.port=5433
 
 # Deep property overrides with operators
 dotnet run -- db.max_connections*=2 db.timeout+=10 tags+=[gpu,cluster] debug!=true
+
+# Multi-run sweeps with range(), linspace(), choice(), and glob()
+dotnet run -- -m db=glob(*) active_workers=range(2,8,2) lr=linspace(0.01,0.1,5)
 ```
 
 ### ASP.NET Core & Microsoft.Extensions.Configuration

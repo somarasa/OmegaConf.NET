@@ -23,15 +23,20 @@ public class InterpolationEngine : IInterpolationContext
 
     /// <summary>
     /// Initializes a new instance of the <see cref="InterpolationEngine"/> class and registers the built-in
-    /// <see cref="EnvResolver"/> (<c>env</c>) and <see cref="EvalResolver"/> (<c>eval</c>).
+    /// resolvers (<c>env</c>, <c>oc.env</c>, <c>eval</c>, <c>now</c>, <c>oc.select</c>, <c>oc.decode</c>, and <c>oc.dict.keys</c>).
     /// </summary>
     /// <param name="root">The root configuration object node to resolve against.</param>
     /// <param name="resolvers">Optional additional custom resolvers.</param>
     public InterpolationEngine(ConfigObjectNode root, IEnumerable<IResolver>? resolvers = null)
     {
         _root = root;
-        RegisterResolver(new EnvResolver());
+        RegisterResolver(new EnvResolver("env"));
+        RegisterResolver(new EnvResolver("oc.env"));
         RegisterResolver(new EvalResolver());
+        RegisterResolver(new NowResolver());
+        RegisterResolver(new OcSelectResolver());
+        RegisterResolver(new OcDecodeResolver());
+        RegisterResolver(new OcDictKeysResolver());
 
         if (resolvers != null)
         {
@@ -60,16 +65,37 @@ public class InterpolationEngine : IInterpolationContext
 
     /// <summary>
     /// Recursively walks a <see cref="ConfigNode"/> and resolves any string values containing <c>${...}</c> or <c>\${...}</c>.
+    /// If a standalone interpolation resolves to a structured <see cref="ConfigNode"/> (e.g. via <c>${oc.decode:[1,2]}</c>,
+    /// <c>${oc.dict.keys:db}</c>, or subtree reference <c>${primary_db}</c>), replaces the leaf node in its parent container.
     /// </summary>
     private void ResolveNode(ConfigNode node, string currentPath)
     {
         switch (node)
         {
             case ConfigObjectNode obj:
-                foreach (var (key, child) in obj.Children)
+                foreach (var key in obj.Children.Keys.ToList())
                 {
+                    var child = obj.Children[key];
                     string childPath = string.IsNullOrEmpty(currentPath) ? key : $"{currentPath}.{key}";
-                    ResolveNode(child, childPath);
+                    if (child is ConfigValueNode childVal && childVal.Value is string rawChildStr && (rawChildStr.Contains("${") || rawChildStr.Contains(@"\${")))
+                    {
+                        childVal.RawTemplate ??= rawChildStr;
+                        var resolved = ResolveStringValue(rawChildStr, childPath, childVal.Source);
+                        if (resolved is ConfigNode replacementNode)
+                        {
+                            var clonedReplacement = replacementNode.Clone();
+                            obj.Children[key] = clonedReplacement;
+                            ResolveNode(clonedReplacement, childPath);
+                        }
+                        else
+                        {
+                            childVal.Value = resolved;
+                        }
+                    }
+                    else
+                    {
+                        ResolveNode(child, childPath);
+                    }
                 }
                 break;
 
@@ -77,7 +103,26 @@ public class InterpolationEngine : IInterpolationContext
                 for (int i = 0; i < list.Items.Count; i++)
                 {
                     string itemPath = $"{currentPath}[{i}]";
-                    ResolveNode(list.Items[i], itemPath);
+                    var item = list.Items[i];
+                    if (item is ConfigValueNode itemVal && itemVal.Value is string rawItemStr && (rawItemStr.Contains("${") || rawItemStr.Contains(@"\${")))
+                    {
+                        itemVal.RawTemplate ??= rawItemStr;
+                        var resolved = ResolveStringValue(rawItemStr, itemPath, itemVal.Source);
+                        if (resolved is ConfigNode replacementNode)
+                        {
+                            var clonedReplacement = replacementNode.Clone();
+                            list.Items[i] = clonedReplacement;
+                            ResolveNode(clonedReplacement, itemPath);
+                        }
+                        else
+                        {
+                            itemVal.Value = resolved;
+                        }
+                    }
+                    else
+                    {
+                        ResolveNode(item, itemPath);
+                    }
                 }
                 break;
 
@@ -227,7 +272,7 @@ public class InterpolationEngine : IInterpolationContext
             }
         }
 
-        // Step 2: Check if the expression invokes a registered resolver (e.g. "env:PORT" or "eval: 10 * 20")
+        // Step 2: Check if the expression invokes a registered resolver (e.g. "env:PORT", "oc.decode:...", or "eval: 10 * 20")
         int colonIdx = expr.IndexOf(':');
         if (colonIdx > 0)
         {
@@ -235,6 +280,10 @@ public class InterpolationEngine : IInterpolationContext
             if (_resolvers.TryGetValue(potentialPrefix, out var resolver))
             {
                 string arg = expr[(colonIdx + 1)..].Trim();
+                if (resolver is ITypedResolver typedResolver)
+                {
+                    return typedResolver.ResolveTyped(arg, this);
+                }
                 return resolver.Resolve(arg, this);
             }
         }

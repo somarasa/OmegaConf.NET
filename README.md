@@ -295,10 +295,21 @@ total_batch: "${eval: ${batch_size} * ${num_gpus}}"  # Resolves to 128
 timeout_calc: "${eval: 10 + 5 * 2}"                 # Resolves to 20
 ```
 
-### Environment Variables & Custom Resolvers
+### Environment Variables, `oc.*` Built-In Resolvers & Custom Resolvers
 ```yaml
-# Environment variable with fallback
+# Environment variable with fallback (${env:...} or ${oc.env:...})
 database_url: "${env:DATABASE_URL, postgresql://localhost:5432/dev}"
+
+# Safe path selection with optional fallback (returns null if missing and no fallback)
+optional_port: "${oc.select:db.port, 5432}"
+
+# Decode string (e.g. from env var) into native int, bool, list, or object
+decoded_port: "${oc.decode:${oc.env:PORT_STR, 8080}}"
+decoded_list: "${oc.decode:[10, 20, 30]}"
+
+# Extract dictionary keys as a list & format current timestamp
+db_keys: "${oc.dict.keys:db}"
+run_dir: "outputs/${now:yyyy-MM-dd}/${now:HH-mm-ss}"
 
 # Custom registered resolver
 log_dir: "/var/log/apps/${slugify:${app_name}}"
@@ -307,6 +318,54 @@ log_dir: "/var/log/apps/${slugify:${app_name}}"
 Register custom resolvers in C#:
 ```csharp
 builder.RegisterResolver("slugify", raw => raw.ToLowerInvariant().Replace(' ', '-'));
+```
+
+---
+
+## 📦 Advanced Hydra & OmegaConf Features
+
+### 1. Package Directives (`@package`, `@_global_`, and `# @package` Headers)
+Mount the same config group multiple times under different namespaces or merge a config group directly into the root:
+```yaml
+defaults:
+  - db@primary_db: postgres       # Mounts db/postgres.yaml under 'primary_db'
+  - db@replica_db: sqlite         # Mounts db/sqlite.yaml under 'replica_db'
+  - experiment@_global_: fast     # Merges experiment/fast.yaml directly into root
+  - _self_
+```
+You can also place `# @package _global_` (or `# @package custom.path`) at the top of a config file, or override packages from the CLI (`+experiment@_global_=fast`).
+
+### 2. Rich Multi-Run Sweep Generators (`range`, `linspace`, `choice`, `glob`)
+Run hyperparameter or multi-environment sweeps using `-m` / `--multirun`:
+```bash
+dotnet run -- -m db=glob(*) workers=range(2,8,2) lr=linspace(0.01,0.1,5) tags=choice([a,b],[c,d])
+```
+
+### 3. Strict Struct Mode (`WithStructMode()`), `+key` / `++key` & Deep Deletion (`~key.path`)
+Catch command-line typos before they silently create invalid keys:
+```csharp
+var node = OmegaConfBuilder.Create()
+    .SetRoot("configs")
+    .WithStructMode()       // Throws ConfigStructException on undeclared keys
+    .WithReadOnly()         // Freezes resolved AST against post-build mutation
+    .WithOutputDirectory("outputs/${now:yyyy-MM-dd}") // Saves .omegaconf/config.yaml & overrides.yaml
+    .AddCliArgs(
+        "~db.secret_token", // Deletes nested property
+        "+db.pool_size=20", // Explicitly appends a new key
+        "++db.port=5433"    // Safe upsert (overrides or creates)
+    )
+    .BuildNode();
+```
+
+### 4. Programmatic `OmegaConfig` Facade & `_args_` / `_partial_` Instantiation
+```csharp
+// Merge inline or file-backed configs and safely query with Select<T>
+var merged = OmegaConfig.Merge(OmegaConfig.ParseYaml(yaml), OmegaConfig.ParseJson(json));
+int port = OmegaConfig.Select(merged, "db.port", 5432);
+
+// Dynamic instantiation with _target_, positional _args_, or lazy Func<T> factories (_partial_)
+var client = OmegaConfig.Instantiate<IEndpointClient>(merged.SelectNode("client")!);
+var factory = OmegaConfig.Instantiate<Func<IEndpointClient>>(merged.SelectNode("client")!);
 ```
 
 ---

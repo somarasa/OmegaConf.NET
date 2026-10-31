@@ -8,23 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2026-10-31
 
 ### Added
-- **Hierarchical Tree Composition**: Hydra-style `defaults:` lists, Config Groups, optional defaults (`optional group: file`), and `_self_` precedence control.
+- **Hierarchical Tree Composition & Package Directives**: Hydra-style `defaults:` lists, Config Groups, `@package` and `@_global_` mounting directives, `# @package` file headers, optional defaults (`optional group: file`), and `_self_` precedence control.
 - **Multi-Level Auto-Cascading & Explicit Inheritance**: Automatic parent cascading across directory hierarchies (e.g. `db/postgres.yaml` -> `db/cloud/postgres.yaml` -> `db/cloud/aws/postgres.yaml`) and explicit `_inherits_` / `_base_` support across formats.
-- **In-Config & CLI Mutation Operators**: Key-suffix and CLI operators `=`, `+=`, `-=`, `*=`, `/=`, `&=`, `|=`, and `!=` across numbers, strings, booleans, lists, and objects.
-- **Multi-Format Parsing & Serialization**: Built-in support for YAML (`.yaml`, `.yml`), JSON / JSONC (`.json`, `.jsonc` with comments and trailing commas), and TOML (`.toml`), plus `.ToYaml()`, `.ToJson()`, and `.ToToml()` serialization.
+- **In-Config & CLI Mutation Operators + Struct Mode**:
+  - Key-suffix and CLI operators `=`, `+=`, `-=`, `*=`, `/=`, `&=`, `|=`, and `!=` across numbers, strings, booleans, lists, and objects.
+  - Strict Struct Mode (`WithStructMode()` / `SetStruct()`), `+key=val` strict append, `++key=val` safe upsert, and `~key.path` deep property deletion.
+- **Multi-Format Parsing, Serialization & Programmatic AST API**:
+  - Built-in support for YAML (`.yaml`, `.yml`), JSON / JSONC (`.json`, `.jsonc` with comments and trailing commas), and TOML (`.toml`), plus `.ToYaml()`, `.ToJson()`, and `.ToToml()` serialization.
+  - `OmegaConfig` static facade (`Merge`, `Select`, `SetReadOnly` / `Freeze`, `SetStruct`, `Instantiate`, `ParseYaml`, `ParseJson`, `ParseToml`).
 - **Variable Interpolation & Resolvers**:
-  - Native type preservation for single-variable interpolations (`${server.port}`).
+  - Native type preservation for single-variable interpolations (`${server.port}`) and AST subtree/node replacement.
   - List element indexing (`${servers[0]}` and `${servers.0}`).
   - Relative and sibling dot navigation (`${.sibling}` and `${..parent}`).
   - Literal escaping (`\${...}`) and default fallbacks (`${key:default}`).
-  - Built-in `${eval:...}` math/logic expression evaluator and `${env:VAR, fallback}` resolver.
+  - Built-in `${eval:...}`, `${env:VAR, fallback}`, `${oc.env:...}`, `${oc.select:path, fallback}`, `${oc.decode:...}`, `${oc.dict.keys:...}`, and `${now:format}` resolvers.
   - Extensible custom C# resolvers (`RegisterResolver`) with nested interpolation support.
-- **Structured Configs & Strict Binding**:
+- **Structured Configs, Records & Dynamic Instantiation**:
   - Automatic `PascalCase` to `snake_case` (including acronym handling), `kebab-case`, and `camelCase` mapping for C# POCOs and positional `record` primary constructors.
-  - Support for primitives, enums, `TimeSpan`, `DateTime`, `DateTimeOffset`, `DateOnly`, `TimeOnly`, `Guid`, `Uri`, arrays, lists, dictionaries, and dynamic `_target_` instantiation.
+  - Support for primitives, enums, `TimeSpan`, `DateTime`, `DateTimeOffset`, `DateOnly`, `TimeOnly`, `Guid`, `Uri`, arrays, lists, dictionaries, and dynamic `_target_` instantiation with positional `_args_` and lazy `Func<T>` (`_partial_`) factories.
   - `[ConfigRequired]`, `[ConfigKey]`, `[ConfigIgnore]`, and `???` mandatory value marker validation with source file/line diagnostics.
-- **Multi-Run Sweeps, Diffing & JSON Schema**:
-  - `SweepEngine` (`-m` / `--multirun`) for Cartesian parameter sweeps.
+- **Multi-Run Sweep Generators, Reproducibility Snapshots, Diffing & JSON Schema**:
+  - `SweepEngine` (`-m` / `--multirun`) supporting Cartesian sweeps across comma-separated lists, `range()`, `linspace()` / `interval()`, `choice()`, and `glob()`.
+  - `.WithOutputDirectory(...)` reproducibility manager writing `.omegaconf/config.yaml`, `.omegaconf/overrides.yaml`, and `multirun.yaml`.
   - `ConfigDiffer` for hierarchical configuration comparison (`+`, `-`, `~`).
   - `JsonSchemaGenerator` for Draft-07 IDE auto-complete schemas.
 - **Microsoft.Extensions.Configuration & DI Integration**: `AddOmegaConf` and `ConfigureOmegaConf<T>` extension methods in `OmegaConf.NET.Extensions`.

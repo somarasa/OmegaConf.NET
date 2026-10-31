@@ -93,6 +93,10 @@ public class TreeResolver
 
             // Step 2: If this is the entrypoint file, process its defaults list and config groups
             var defaults = DefaultsListParser.Parse(currentNode);
+
+            // Also append any dynamically added CLI config groups (e.g. "+db@replica=sqlite" or "+experiment@_global_=exp1")
+            AppendDynamicSelectedGroups(rootDir, defaults, selectedPaths);
+
             if (defaults.Count == 0)
             {
                 currentNode.RemoveChild(DefaultsListParser.DefaultsKey);
@@ -104,6 +108,33 @@ public class TreeResolver
         finally
         {
             _loadingStack.Remove(canonicalPath);
+        }
+    }
+
+    /// <summary>
+    /// Appends any config groups requested via <paramref name="selectedPaths"/> (such as <c>+experiment@_global_=fast</c>
+    /// or <c>db@analytics_db=postgres</c>) that are not already present in the entrypoint's <c>defaults:</c> list.
+    /// </summary>
+    private static void AppendDynamicSelectedGroups(
+        string rootDir,
+        List<DefaultsEntry> defaults,
+        Dictionary<string, string> selectedPaths)
+    {
+        foreach (var (rawKey, val) in selectedPaths)
+        {
+            string key = rawKey.TrimStart('+');
+            DefaultsListParser.SplitPackage(key, out string group, out string? pkg);
+
+            // Check if this group/package combination already exists in defaults
+            bool alreadyInDefaults = defaults.Any(d =>
+                !d.IsSelf &&
+                string.Equals(d.Group, group, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(d.Package ?? "", pkg ?? "", StringComparison.OrdinalIgnoreCase));
+
+            if (!alreadyInDefaults && Directory.Exists(Path.Combine(rootDir, group)))
+            {
+                defaults.Add(DefaultsEntry.GroupChoice(group, val, isOptional: false, package: pkg));
+            }
         }
     }
 
@@ -152,7 +183,8 @@ public class TreeResolver
     }
 
     /// <summary>
-    /// Resolves a single <see cref="DefaultsEntry"/> and mounts the resulting node under its group key on <paramref name="target"/>.
+    /// Resolves a single <see cref="DefaultsEntry"/> and mounts the resulting node under its target package
+    /// (which defaults to <see cref="DefaultsEntry.Group"/>, or merges into the root when <c>@_global_</c> is used).
     /// </summary>
     private void ApplyDefaultEntry(
         ConfigObjectNode target,
@@ -163,39 +195,94 @@ public class TreeResolver
     {
         if (string.IsNullOrEmpty(entry.Group)) return;
 
-        // Skip if the group was dropped via CLI (~group) or builder.DropGroup(group)
-        if (droppedGroups.Contains(entry.Group))
+        // Skip if the group (or group@package) was dropped via CLI (~group or ~group@package) or builder.DropGroup(...)
+        if (droppedGroups.Contains(entry.SelectionKey) ||
+            (string.IsNullOrEmpty(entry.Package) && droppedGroups.Contains(entry.Group)))
         {
             return;
         }
 
-        // Check if the group's path was overridden via CLI (group=new/path) or builder.SelectPath(...)
-        string subPath = selectedPaths.TryGetValue(entry.Group, out var overridePath)
-            ? overridePath
-            : entry.Path ?? entry.Group;
+        // Check if the group's path was overridden via CLI (group@pkg=new/path or group=new/path) or builder.SelectPath(...)
+        string subPath;
+        if (selectedPaths.TryGetValue(entry.SelectionKey, out var exactOverride))
+        {
+            subPath = exactOverride;
+        }
+        else if (selectedPaths.TryGetValue("+" + entry.SelectionKey, out var plusOverride))
+        {
+            subPath = plusOverride;
+        }
+        else if (string.IsNullOrEmpty(entry.Package) && selectedPaths.TryGetValue(entry.Group, out var groupOverride))
+        {
+            subPath = groupOverride;
+        }
+        else
+        {
+            subPath = entry.Path ?? entry.Group;
+        }
 
-        var groupNode = ResolveGroupWithCascading(rootDir, entry.Group, subPath, entry.IsOptional, selectedPaths, droppedGroups);
+        var (groupNode, filePackageHeader) = ResolveGroupWithCascading(rootDir, entry.Group, subPath, entry.IsOptional, selectedPaths, droppedGroups);
         if (groupNode != null)
         {
-            if (target.TryGetChild(entry.Group, out var existingGroupNode))
+            // Precedence for target package: explicit DefaultsEntry @package > file '# @package' header > group name
+            string targetPackage = entry.Package ?? filePackageHeader ?? entry.Group;
+            MountPackageNode(target, targetPackage, groupNode);
+        }
+    }
+
+    /// <summary>
+    /// Mounts <paramref name="groupNode"/> onto <paramref name="root"/> according to <paramref name="targetPackage"/>:
+    /// - <c>"_global_"</c>: merges <paramref name="groupNode"/>'s properties directly into <paramref name="root"/>.
+    /// - Dot-separated package path (e.g. <c>"primary_db"</c> or <c>"storage.primary_db"</c>): mounts at that nested path.
+    /// </summary>
+    private static void MountPackageNode(ConfigObjectNode root, string targetPackage, ConfigObjectNode groupNode)
+    {
+        if (string.Equals(targetPackage, DefaultsEntry.GlobalPackage, StringComparison.OrdinalIgnoreCase))
+        {
+            foreach (var (k, v) in groupNode.Children)
             {
-                target.SetChild(entry.Group, OperatorEngine.Apply(existingGroupNode, groupNode));
+                if (root.TryGetChild(k, out var existingChild))
+                {
+                    root.SetChild(k, OperatorEngine.Apply(existingChild, v));
+                }
+                else
+                {
+                    root.SetChild(k, v.Clone());
+                }
             }
-            else
+            return;
+        }
+
+        string[] parts = targetPackage.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0) return;
+
+        ConfigObjectNode current = root;
+        for (int i = 0; i < parts.Length - 1; i++)
+        {
+            if (!current.TryGetChild(parts[i], out var next) || next is not ConfigObjectNode nextObj)
             {
-                target.SetChild(entry.Group, groupNode);
+                nextObj = new ConfigObjectNode();
+                current.SetChild(parts[i], nextObj);
             }
+            current = nextObj;
+        }
+
+        string leafKey = parts[^1];
+        if (current.TryGetChild(leafKey, out var existingGroupNode))
+        {
+            current.SetChild(leafKey, OperatorEngine.Apply(existingGroupNode, groupNode));
+        }
+        else
+        {
+            current.SetChild(leafKey, groupNode);
         }
     }
 
     /// <summary>
     /// Loads a config group file, automatically cascading down from parent directories that contain a file with the same name.
-    /// For example, selecting <c>db=cloud/aws/postgres</c> automatically loads and merges:
-    /// 1. <c>db/postgres.yaml</c> (if present)
-    /// 2. <c>db/cloud/postgres.yaml</c> (if present)
-    /// 3. <c>db/cloud/aws/postgres.yaml</c>
+    /// Also extracts any <c># @package</c> or <c>// @package</c> directive from the top of the leaf file.
     /// </summary>
-    private ConfigObjectNode? ResolveGroupWithCascading(
+    private (ConfigObjectNode? Node, string? FilePackageHeader) ResolveGroupWithCascading(
         string rootDir,
         string group,
         string subPath,
@@ -209,10 +296,11 @@ public class TreeResolver
 
         if (resolvedFile == null)
         {
-            if (isOptional) return null;
+            if (isOptional) return (null, null);
             throw new FileNotFoundException($"Configuration file for group '{group}' at path '{subPath}' was not found in '{groupDir}'.");
         }
 
+        string? filePackageHeader = ExtractFilePackageHeader(resolvedFile);
         string fileName = Path.GetFileName(resolvedFile);
         string relativeSubDir = Path.GetDirectoryName(subPath) ?? "";
 
@@ -244,10 +332,49 @@ public class TreeResolver
 
         if (accumulatedCascadeNode != null)
         {
-            return (ConfigObjectNode)OperatorEngine.Apply(accumulatedCascadeNode, currentNode);
+            return ((ConfigObjectNode)OperatorEngine.Apply(accumulatedCascadeNode, currentNode), filePackageHeader);
         }
 
-        return currentNode;
+        return (currentNode, filePackageHeader);
+    }
+
+    /// <summary>
+    /// Scans the leading comment lines of a configuration file for a Hydra <c># @package &lt;target&gt;</c> or <c>// @package &lt;target&gt;</c> header.
+    /// </summary>
+    private static string? ExtractFilePackageHeader(string filePath)
+    {
+        try
+        {
+            foreach (var rawLine in File.ReadLines(filePath).Take(10))
+            {
+                string line = rawLine.Trim();
+                if (string.IsNullOrEmpty(line)) continue;
+
+                if (line.StartsWith('#') || line.StartsWith("//", StringComparison.Ordinal))
+                {
+                    string commentBody = line.TrimStart('#', '/').Trim();
+                    if (commentBody.StartsWith("@package ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string pkg = commentBody["@package ".Length..].Trim();
+                        if (!string.IsNullOrEmpty(pkg))
+                        {
+                            return pkg;
+                        }
+                    }
+                }
+                else
+                {
+                    // Stop scanning once actual content lines begin
+                    break;
+                }
+            }
+        }
+        catch
+        {
+            // Ignore I/O issues during header probing
+        }
+
+        return null;
     }
 
     /// <summary>

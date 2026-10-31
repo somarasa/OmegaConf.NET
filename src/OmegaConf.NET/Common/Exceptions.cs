@@ -131,3 +131,32 @@ public class ConfigInheritanceException : OmegaConfException
     {
     }
 }
+
+/// <summary>
+/// Thrown in Struct Mode when an override attempts to set or delete a key that does not exist in the schema,
+/// or when a <c>+key</c> append operator targets a key that already exists.
+/// </summary>
+public class ConfigStructException : OmegaConfException
+{
+    /// <summary>Gets the dot-separated configuration key path that violated struct mode rules.</summary>
+    public string ConfigPath { get; }
+
+    /// <summary>Initializes a new instance of <see cref="ConfigStructException"/>.</summary>
+    public ConfigStructException(string configPath, string message, SourceInfo? source = null)
+        : base($"Struct mode error at '{configPath}': {message}", source)
+    {
+        ConfigPath = configPath;
+    }
+}
+
+/// <summary>
+/// Thrown when attempting to mutate a <see cref="Ast.ConfigNode"/> that has been locked as read-only (<see cref="Ast.ConfigNode.IsReadOnly"/>).
+/// </summary>
+public class ConfigReadOnlyException : OmegaConfException
+{
+    /// <summary>Initializes a new instance of <see cref="ConfigReadOnlyException"/>.</summary>
+    public ConfigReadOnlyException(string message, SourceInfo? source = null)
+        : base($"Read-only configuration error: {message}", source)
+    {
+    }
+}
