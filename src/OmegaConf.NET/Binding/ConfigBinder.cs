@@ -1,5 +1,4 @@
 using System.Collections;
-using System.ComponentModel;
 using System.Globalization;
 using System.Reflection;
 using OmegaConf.NET.Ast;
@@ -8,24 +7,37 @@ using OmegaConf.NET.Common;
 
 namespace OmegaConf.NET.Binding;
 
+/// <summary>
+/// Binds a resolved <see cref="ConfigNode"/> AST into strongly typed C# POCOs, positional <c>record</c> types,
+/// collections, dictionaries, enums, and rich scalar types (<see cref="TimeSpan"/>, <see cref="DateTimeOffset"/>,
+/// <see cref="DateOnly"/>, <see cref="TimeOnly"/>, <see cref="Guid"/>, <see cref="Uri"/>).
+/// </summary>
 public static class ConfigBinder
 {
+    /// <summary>
+    /// Hydra-style key (<c>"_target_"</c>) used in configuration objects to specify an assembly-qualified runtime type for polymorphic instantiation.
+    /// </summary>
     public const string TargetKey = "_target_";
 
     /// <summary>
-    /// Binds a ConfigNode to a strongly typed C# object.
+    /// Binds a <see cref="ConfigNode"/> to a strongly typed C# instance of <typeparamref name="T"/>.
     /// </summary>
+    /// <typeparam name="T">Target C# class, struct, or positional record type.</typeparam>
+    /// <param name="node">The resolved AST node to bind from.</param>
     public static T Bind<T>(ConfigNode node)
     {
         return (T)Bind(node, typeof(T), "");
     }
 
     /// <summary>
-    /// Binds a ConfigNode to a specific Type.
+    /// Binds a <see cref="ConfigNode"/> to the specified runtime <paramref name="targetType"/>.
     /// </summary>
+    /// <param name="node">The resolved AST node to bind from.</param>
+    /// <param name="targetType">The target CLR <see cref="Type"/>.</param>
+    /// <param name="currentPath">Dot-separated configuration path used for diagnostic error reporting.</param>
     public static object Bind(ConfigNode node, Type targetType, string currentPath = "")
     {
-        // Handle Nullable<T>
+        // 1. Handle Nullable<T> value types
         var underlyingType = Nullable.GetUnderlyingType(targetType);
         if (underlyingType != null)
         {
@@ -40,7 +52,7 @@ public static class ConfigBinder
             return Bind(node, underlyingType, currentPath);
         }
 
-        // Handle string
+        // 2. Handle string
         if (targetType == typeof(string))
         {
             if (node is ConfigValueNode vn)
@@ -54,7 +66,7 @@ public static class ConfigBinder
             return node.ToString() ?? "";
         }
 
-        // Handle Primitives and Enums
+        // 3. Handle Primitives, Enums, and Rich Built-In Scalar Types
         if (targetType.IsPrimitive || targetType.IsEnum || targetType == typeof(decimal) ||
             targetType == typeof(DateTime) || targetType == typeof(DateTimeOffset) ||
             targetType == typeof(DateOnly) || targetType == typeof(TimeOnly) ||
@@ -63,28 +75,31 @@ public static class ConfigBinder
             return BindScalar(node, targetType, currentPath);
         }
 
-        // Handle Arrays
+        // 4. Handle Arrays (T[])
         if (targetType.IsArray)
         {
             return BindArray(node, targetType, currentPath);
         }
 
-        // Handle Generic Lists (List<T>, IList<T>, IReadOnlyList<T>, IEnumerable<T>)
+        // 5. Handle Generic Lists (List<T>, IList<T>, IReadOnlyList<T>, IEnumerable<T>)
         if (IsGenericList(targetType, out var itemType))
         {
             return BindList(node, targetType, itemType!, currentPath);
         }
 
-        // Handle Dictionaries (Dictionary<string, T>, IDictionary<string, T>)
+        // 6. Handle Generic Dictionaries (Dictionary<string, T>, IDictionary<string, T>, IReadOnlyDictionary<string, T>)
         if (IsGenericDictionary(targetType, out var dictKeyType, out var dictValType))
         {
             return BindDictionary(node, targetType, dictKeyType!, dictValType!, currentPath);
         }
 
-        // Handle Complex Object / POCO / Record
+        // 7. Handle Complex Object / POCO / Positional Record
         return BindObject(node, targetType, currentPath);
     }
 
+    /// <summary>
+    /// Converts a <see cref="ConfigValueNode"/> scalar value to <paramref name="targetType"/> using invariant culture rules.
+    /// </summary>
     private static object BindScalar(ConfigNode node, Type targetType, string currentPath)
     {
         if (node is not ConfigValueNode vn)
@@ -153,6 +168,10 @@ public static class ConfigBinder
         }
     }
 
+    /// <summary>
+    /// Instantiates a POCO or positional <c>record</c> (respecting polymorphic <c>_target_</c> if specified)
+    /// and binds all matching configuration keys onto its constructor parameters and writable properties.
+    /// </summary>
     private static object BindObject(ConfigNode node, Type targetType, string currentPath)
     {
         if (node is not ConfigObjectNode objNode)
@@ -160,7 +179,7 @@ public static class ConfigBinder
             throw new ConfigTypeMismatchException(currentPath, targetType, node.ToString(), node.Source);
         }
 
-        // Check for dynamic _target_ type
+        // Check for dynamic polymorphic _target_ type override
         Type concreteType = targetType;
         if (objNode.TryGetChild(TargetKey, out var targetValNode) && targetValNode is ConfigValueNode tvn && tvn.Value is string targetTypeName)
         {
@@ -171,9 +190,11 @@ public static class ConfigBinder
             }
         }
 
+        // Instantiate via parameterless constructor (POCO) or parameterized primary constructor (positional record)
         var boundParameterNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         object instance = CreateInstanceOrRecord(concreteType, objNode, currentPath, boundParameterNames);
 
+        // Bind remaining writable properties that were not already populated by a primary constructor
         var properties = concreteType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
                                      .Where(p => p.CanWrite && p.GetCustomAttribute<ConfigIgnoreAttribute>() == null);
 
@@ -216,6 +237,10 @@ public static class ConfigBinder
         return instance;
     }
 
+    /// <summary>
+    /// Creates an instance of <paramref name="concreteType"/>. Uses the parameterless constructor if available;
+    /// otherwise binds arguments to the public constructor with the most parameters (supporting C# positional records).
+    /// </summary>
     private static object CreateInstanceOrRecord(
         Type concreteType,
         ConfigObjectNode objNode,
@@ -237,7 +262,7 @@ public static class ConfigBinder
             }
         }
 
-        // Support positional records / primary constructors
+        // Fallback to primary / parameterized constructor for positional records
         var primaryCtor = constructors.OrderByDescending(c => c.GetParameters().Length).FirstOrDefault();
         if (primaryCtor == null)
         {
@@ -253,6 +278,7 @@ public static class ConfigBinder
             string paramName = param.Name ?? $"arg{i}";
             string paramPath = string.IsNullOrEmpty(currentPath) ? paramName : $"{currentPath}.{paramName}";
 
+            // Check attributes on both the constructor parameter and its corresponding synthesized property
             var matchingProp = concreteType.GetProperty(paramName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
             var explicitKey = param.GetCustomAttribute<ConfigKeyAttribute>()?.Key
                               ?? matchingProp?.GetCustomAttribute<ConfigKeyAttribute>()?.Key;
@@ -294,9 +320,17 @@ public static class ConfigBinder
         return primaryCtor.Invoke(args);
     }
 
+    /// <summary>
+    /// Searches <paramref name="objNode"/> for a child matching a C# property/parameter name using the following precedence:
+    /// 1. Explicit <see cref="ConfigKeyAttribute"/> key
+    /// 2. Exact C# member name (case-insensitive)
+    /// 3. <c>snake_case</c> conversion (e.g. <c>AppName</c> -> <c>app_name</c>, <c>SSLPort</c> -> <c>ssl_port</c>)
+    /// 4. <c>kebab-case</c> conversion (e.g. <c>AppName</c> -> <c>app-name</c>)
+    /// 5. <c>camelCase</c> conversion (e.g. <c>AppName</c> -> <c>appName</c>)
+    /// </summary>
     private static ConfigNode? FindMatchingChild(ConfigObjectNode objNode, string memberName, string? explicitKey = null)
     {
-        // 1. Explicit ConfigKeyAttribute
+        // 1. Explicit [ConfigKey("...")]
         if (!string.IsNullOrEmpty(explicitKey))
         {
             return objNode.GetChild(explicitKey);
@@ -332,6 +366,11 @@ public static class ConfigBinder
         return null;
     }
 
+    /// <summary>
+    /// Converts a <c>PascalCase</c> or <c>camelCase</c> identifier into <c>snake_case</c>,
+    /// keeping multi-letter uppercase acronyms grouped together (e.g. <c>"SSLPort"</c> -> <c>"ssl_port"</c>,
+    /// <c>"HTTPSEndpoint"</c> -> <c>"https_endpoint"</c>, <c>"MaxDBConnections"</c> -> <c>"max_db_connections"</c>).
+    /// </summary>
     public static string ToSnakeCase(string str)
     {
         if (string.IsNullOrEmpty(str)) return str;
@@ -343,6 +382,9 @@ public static class ConfigBinder
             {
                 if (i > 0 && str[i - 1] != '_')
                 {
+                    // Insert an underscore before an uppercase letter if:
+                    // - the previous character was lowercase or a digit (e.g. "App|Name", "OAuth2|Client"), OR
+                    // - the next character is lowercase, marking the end of an acronym prefix (e.g. "SSL|Port")
                     bool prevIsLowerOrDigit = char.IsLower(str[i - 1]) || char.IsDigit(str[i - 1]);
                     bool nextIsLower = i + 1 < str.Length && char.IsLower(str[i + 1]);
                     if (prevIsLowerOrDigit || nextIsLower)

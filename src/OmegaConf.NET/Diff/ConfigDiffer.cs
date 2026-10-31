@@ -3,19 +3,35 @@ using OmegaConf.NET.Ast;
 
 namespace OmegaConf.NET.Diff;
 
+/// <summary>
+/// Categorizes the type of difference detected between two configuration nodes.
+/// </summary>
 public enum ConfigDiffChangeType
 {
+    /// <summary> + Key was added in the target configuration. </summary>
     Added,
+
+    /// <summary> - Key was removed in the target configuration. </summary>
     Removed,
+
+    /// <summary> ~ Value or type of the key was modified between base and target. </summary>
     Modified
 }
 
+/// <summary>
+/// Represents a single property difference between two configuration trees.
+/// </summary>
+/// <param name="Path">Dot-separated configuration key path (e.g. <c>"db.max_connections"</c>).</param>
+/// <param name="ChangeType">Whether the key was Added (<c>+</c>), Removed (<c>-</c>), or Modified (<c>~</c>).</param>
+/// <param name="OldValue">Previous value in the base tree, or <c>null</c> if added.</param>
+/// <param name="NewValue">Updated value in the target tree, or <c>null</c> if removed.</param>
 public sealed record ConfigDiffEntry(
     string Path,
     ConfigDiffChangeType ChangeType,
     object? OldValue,
     object? NewValue)
 {
+    /// <inheritdoc />
     public override string ToString()
     {
         return ChangeType switch
@@ -35,17 +51,32 @@ public sealed record ConfigDiffEntry(
     }
 }
 
+/// <summary>
+/// Holds the complete list of hierarchical differences between two <see cref="ConfigNode"/> trees.
+/// </summary>
 public sealed class ConfigDiff
 {
+    /// <summary>
+    /// Gets the ordered list of detected configuration changes.
+    /// </summary>
     public IReadOnlyList<ConfigDiffEntry> Entries { get; }
 
+    /// <summary>
+    /// Gets a value indicating whether any differences were found between the two configurations.
+    /// </summary>
     public bool HasChanges => Entries.Count > 0;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ConfigDiff"/> class.
+    /// </summary>
     public ConfigDiff(IEnumerable<ConfigDiffEntry> entries)
     {
         Entries = entries.ToList();
     }
 
+    /// <summary>
+    /// Formats the diff report as a human-readable multi-line string (<c>+ key: val</c>, <c>- key: val</c>, <c>~ key: old -> new</c>).
+    /// </summary>
     public override string ToString()
     {
         if (!HasChanges)
@@ -62,10 +93,13 @@ public sealed class ConfigDiff
     }
 }
 
+/// <summary>
+/// Hierarchically compares two <see cref="ConfigNode"/> trees and produces a structured <see cref="ConfigDiff"/> report.
+/// </summary>
 public static class ConfigDiffer
 {
     /// <summary>
-    /// Compares two configuration nodes and returns the hierarchical diff.
+    /// Compares <paramref name="baseNode"/> against <paramref name="targetNode"/> and returns all additions, removals, and modifications.
     /// </summary>
     public static ConfigDiff Compare(ConfigNode? baseNode, ConfigNode? targetNode)
     {
@@ -76,7 +110,7 @@ public static class ConfigDiffer
 
     private static void CompareNodes(ConfigNode? a, ConfigNode? b, string currentPath, List<ConfigDiffEntry> entries)
     {
-        // 1. One is null
+        // Case 1: One side is null
         if (a == null && b != null)
         {
             entries.Add(new ConfigDiffEntry(currentPath, ConfigDiffChangeType.Added, null, GetNodeValue(b)));
@@ -91,7 +125,7 @@ public static class ConfigDiffer
 
         if (a == null && b == null) return;
 
-        // 2. Both are objects
+        // Case 2: Both are object mappings — recursively compare union of all keys in alphabetical order
         if (a is ConfigObjectNode objA && b is ConfigObjectNode objB)
         {
             var allKeys = new HashSet<string>(objA.Children.Keys, StringComparer.OrdinalIgnoreCase);
@@ -119,7 +153,7 @@ public static class ConfigDiffer
             return;
         }
 
-        // 3. Both are lists
+        // Case 3: Both are lists — compare serialized sequence representations
         if (a is ConfigListNode listA && b is ConfigListNode listB)
         {
             string strA = listA.ToString();
@@ -131,7 +165,7 @@ public static class ConfigDiffer
             return;
         }
 
-        // 4. Scalar or type change
+        // Case 4: Scalar value comparison or node type change
         object? valA = GetNodeValue(a);
         object? valB = GetNodeValue(b);
 
@@ -152,6 +186,9 @@ public static class ConfigDiffer
         };
     }
 
+    /// <summary>
+    /// Extension method to compare <paramref name="baseNode"/> with <paramref name="targetNode"/>.
+    /// </summary>
     public static ConfigDiff Diff(this ConfigNode baseNode, ConfigNode targetNode)
     {
         return Compare(baseNode, targetNode);

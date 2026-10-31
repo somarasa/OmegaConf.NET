@@ -4,13 +4,19 @@ using OmegaConf.NET.Common;
 namespace OmegaConf.NET.Interpolation;
 
 /// <summary>
-/// Built-in math and logic expression evaluator resolver.
-/// Syntax: ${eval: 10 * 20} or ${eval: ${batch_size} * 4}
+/// Built-in math, comparison, and boolean logic expression evaluator resolver (<c>${eval:...}</c>).
+/// Implements a zero-dependency recursive-descent parser supporting:
+/// - Logical OR (<c>||</c>) and Logical AND (<c>&amp;&amp;</c>)
+/// - Equality (<c>==</c>, <c>!=</c>) and Relational comparisons (<c>&lt;</c>, <c>&lt;=</c>, <c>&gt;</c>, <c>&gt;=</c>)
+/// - Additive (<c>+</c>, <c>-</c>) and Multiplicative (<c>*</c>, <c>/</c>, <c>%</c>) arithmetic
+/// - Unary operators (<c>!</c>, <c>-</c>, <c>+</c>), parentheses <c>(...)</c>, numbers, booleans, and string literals.
 /// </summary>
 public class EvalResolver : IResolver
 {
+    /// <inheritdoc />
     public string Name => "eval";
 
+    /// <inheritdoc />
     public string Resolve(string argument, IInterpolationContext context)
     {
         if (string.IsNullOrWhiteSpace(argument))
@@ -23,6 +29,10 @@ public class EvalResolver : IResolver
         return result?.ToString() ?? "";
     }
 
+    /// <summary>
+    /// Recursive-descent expression parser respecting standard operator precedence:
+    /// Primary / Parentheses -> Unary -> Multiplicative -> Additive -> Relational -> Equality -> Logical AND -> Logical OR.
+    /// </summary>
     private sealed class SimpleExpressionParser
     {
         private readonly string _expr;
@@ -45,6 +55,7 @@ public class EvalResolver : IResolver
             return res;
         }
 
+        // Precedence Level 1 (Lowest): Logical OR (||)
         private object? ParseLogicalOr()
         {
             var left = ParseLogicalAnd();
@@ -58,6 +69,7 @@ public class EvalResolver : IResolver
             return left;
         }
 
+        // Precedence Level 2: Logical AND (&&)
         private object? ParseLogicalAnd()
         {
             var left = ParseEquality();
@@ -71,6 +83,7 @@ public class EvalResolver : IResolver
             return left;
         }
 
+        // Precedence Level 3: Equality (==, !=)
         private object? ParseEquality()
         {
             var left = ParseRelational();
@@ -96,6 +109,7 @@ public class EvalResolver : IResolver
             return left;
         }
 
+        // Precedence Level 4: Relational (<, <=, >, >=)
         private object? ParseRelational()
         {
             var left = ParseAdditive();
@@ -131,6 +145,7 @@ public class EvalResolver : IResolver
             return left;
         }
 
+        // Precedence Level 5: Additive (+, -)
         private object? ParseAdditive()
         {
             var left = ParseMultiplicative();
@@ -174,6 +189,7 @@ public class EvalResolver : IResolver
             return left;
         }
 
+        // Precedence Level 6: Multiplicative (*, /, %)
         private object? ParseMultiplicative()
         {
             var left = ParseUnary();
@@ -198,6 +214,7 @@ public class EvalResolver : IResolver
                     double dRight = ToDouble(right);
                     if (dRight == 0.0) throw new DivideByZeroException("Division by zero in eval expression.");
 
+                    // Use exact integer division when evenly divisible; otherwise promote to double
                     if (IsInteger(left) && IsInteger(right) && (ToLong(left) % ToLong(right) == 0))
                     {
                         left = ToLong(left) / ToLong(right);
@@ -221,6 +238,7 @@ public class EvalResolver : IResolver
             return left;
         }
 
+        // Precedence Level 7: Unary (!, -, +)
         private object? ParseUnary()
         {
             SkipWhitespace();
@@ -245,6 +263,7 @@ public class EvalResolver : IResolver
             return ParsePrimary();
         }
 
+        // Precedence Level 8 (Highest): Parentheses, Quoted Strings, Numeric Literals, Booleans & Identifiers
         private object? ParsePrimary()
         {
             SkipWhitespace();
@@ -254,7 +273,7 @@ public class EvalResolver : IResolver
                 throw new ConfigSyntaxException("Unexpected end of eval expression.");
             }
 
-            // Parentheses
+            // 1. Parenthesized sub-expression: (...)
             if (Match("("))
             {
                 var inner = ParseLogicalOr();
@@ -265,7 +284,7 @@ public class EvalResolver : IResolver
                 return inner;
             }
 
-            // String literals: "..." or '...'
+            // 2. Quoted string literal: "..." or '...'
             if (_expr[_pos] is '"' or '\'')
             {
                 char quote = _expr[_pos++];
@@ -275,11 +294,11 @@ public class EvalResolver : IResolver
                     _pos++;
                 }
                 string strVal = _expr[start.._pos];
-                if (_pos < _expr.Length) _pos++; // skip quote
+                if (_pos < _expr.Length) _pos++; // skip closing quote
                 return strVal;
             }
 
-            // Numbers
+            // 3. Numeric literal (integer or floating-point)
             int numStart = _pos;
             bool hasDot = false;
             while (_pos < _expr.Length && (char.IsDigit(_expr[_pos]) || (!hasDot && _expr[_pos] == '.')))
@@ -301,7 +320,7 @@ public class EvalResolver : IResolver
                 }
             }
 
-            // Identifiers / booleans
+            // 4. Boolean keywords (true, false), null, or unquoted identifier tokens
             int idStart = _pos;
             while (_pos < _expr.Length && (char.IsLetterOrDigit(_expr[_pos]) || _expr[_pos] == '_'))
             {

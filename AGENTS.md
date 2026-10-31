@@ -10,11 +10,13 @@
 
 ### Solution Structure
 ```text
-c#omegaconf/
-├── OmegaConf.NET.slnx                   # Solution file
+OmegaConf.NET/
+├── OmegaConf.NET.slnx                  # Solution file
 ├── Directory.Build.props               # Global build properties (LangVersion, UseSharedCompilation)
 ├── LICENSE                             # MIT License
 ├── README.md                           # Human-facing documentation
+├── CHANGELOG.md                        # Version history and release notes
+├── CONTRIBUTING.md                     # Human contributor guide
 ├── AGENTS.md                           # AI Agent operating guide (this file)
 ├── skills/
 │   └── omegaconf-net/SKILL.md          # Agent skill for consuming the framework
@@ -26,7 +28,7 @@ c#omegaconf/
 │   ├── OmegaConf.NET/                  # Core library (AST, Parsers, Operators, Resolvers, Binder)
 │   └── OmegaConf.NET.Extensions/       # Microsoft.Extensions.Configuration & DI provider
 ├── tests/
-│   └── OmegaConf.NET.Tests/            # Comprehensive unit and integration test suite
+│   └── OmegaConf.NET.Tests/            # Comprehensive unit and integration test suite (71 tests)
 └── samples/
     └── QuickStart/                     # Runnable sample console application
 ```

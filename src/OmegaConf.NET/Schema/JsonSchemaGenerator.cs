@@ -7,6 +7,10 @@ using OmegaConf.NET.Binding;
 
 namespace OmegaConf.NET.Schema;
 
+/// <summary>
+/// Generates standard Draft-07 JSON Schemas (<c>http://json-schema.org/draft-07/schema#</c>) from C# configuration POCOs
+/// and positional <c>record</c> types, enabling instant YAML/JSON auto-complete and validation in VS Code, Rider, and Visual Studio.
+/// </summary>
 public static class JsonSchemaGenerator
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -16,11 +20,13 @@ public static class JsonSchemaGenerator
     };
 
     /// <summary>
-    /// Generates a JSON Schema (Draft-07) for a strongly typed configuration class.
-    /// Used by VS Code, Visual Studio, and Rider for YAML/JSON auto-complete and intellisense.
+    /// Generates a Draft-07 JSON Schema string for strongly typed configuration class or positional record <typeparamref name="T"/>.
     /// </summary>
     public static string GenerateSchema<T>() => GenerateSchema(typeof(T));
 
+    /// <summary>
+    /// Generates a Draft-07 JSON Schema string for the specified CLR <paramref name="type"/>.
+    /// </summary>
     public static string GenerateSchema(Type type)
     {
         var root = new JsonObject
@@ -44,16 +50,24 @@ public static class JsonSchemaGenerator
         return root.ToJsonString(JsonOptions);
     }
 
+    /// <summary>
+    /// Generates a Draft-07 JSON Schema for <typeparamref name="T"/> and writes it directly to <paramref name="filePath"/>.
+    /// </summary>
     public static void GenerateSchemaFile<T>(string filePath)
     {
         string schema = GenerateSchema<T>();
         File.WriteAllText(filePath, schema);
     }
 
+    /// <summary>
+    /// Inspects both writable properties and primary constructor parameters on <paramref name="type"/>
+    /// to populate the JSON Schema <c>properties</c> and <c>required</c> arrays.
+    /// </summary>
     private static void PopulateProperties(Type type, JsonObject propertiesNode, JsonArray requiredNode)
     {
         var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // 1. Inspect public writable properties (standard POCOs)
         var props = type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
                         .Where(p => p.CanWrite && p.GetCustomAttribute<ConfigIgnoreAttribute>() == null);
 
@@ -72,7 +86,7 @@ public static class JsonSchemaGenerator
             seenKeys.Add(key);
         }
 
-        // Also support positional record / constructor parameters when properties are get-only
+        // 2. Inspect primary constructor parameters (positional records with get-only/init properties)
         var primaryCtor = type.GetConstructors(BindingFlags.Public | BindingFlags.Instance)
                               .OrderByDescending(c => c.GetParameters().Length)
                               .FirstOrDefault();
@@ -107,6 +121,9 @@ public static class JsonSchemaGenerator
         }
     }
 
+    /// <summary>
+    /// Maps a CLR property/parameter <see cref="Type"/> to its corresponding JSON Schema type definition.
+    /// </summary>
     private static JsonObject GeneratePropertySchema(Type propType)
     {
         var schema = new JsonObject();

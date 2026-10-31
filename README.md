@@ -369,6 +369,6 @@ OmegaConf.NET also includes first-class support for AI agents and coding assista
 
 ---
 
-## 📄 License
+## 📄 License & Contributing
 
-This project is open-source under the [MIT License](LICENSE). Contributions, issues, and pull requests are warmly welcome!
+This project is open-source under the [MIT License](LICENSE). See [CHANGELOG.md](CHANGELOG.md) for release history and [CONTRIBUTING.md](CONTRIBUTING.md) for contributor guidelines. Contributions, issues, and pull requests are warmly welcome!

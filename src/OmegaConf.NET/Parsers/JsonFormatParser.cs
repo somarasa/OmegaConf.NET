@@ -5,6 +5,10 @@ using OmegaConf.NET.Operators;
 
 namespace OmegaConf.NET.Parsers;
 
+/// <summary>
+/// Parses JSON (<c>.json</c>) and JSON with Comments (<c>.jsonc</c>) configuration files into an OmegaConf <see cref="ConfigObjectNode"/> AST.
+/// Automatically skips single-line/multi-line comments and permits trailing commas.
+/// </summary>
 public class JsonFormatParser : IConfigFormatParser
 {
     private static readonly JsonDocumentOptions Options = new()
@@ -13,12 +17,14 @@ public class JsonFormatParser : IConfigFormatParser
         AllowTrailingCommas = true
     };
 
+    /// <inheritdoc />
     public bool CanParse(string extension)
     {
         return string.Equals(extension, ".json", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(extension, ".jsonc", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <inheritdoc />
     public ConfigObjectNode Parse(string content, string? filePath = null)
     {
         if (string.IsNullOrWhiteSpace(content))

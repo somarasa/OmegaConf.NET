@@ -7,14 +7,20 @@ using YamlDotNet.RepresentationModel;
 
 namespace OmegaConf.NET.Parsers;
 
+/// <summary>
+/// Parses YAML (<c>.yaml</c>, <c>.yml</c>) configuration files into an OmegaConf <see cref="ConfigObjectNode"/> AST,
+/// preserving exact line and column numbers on every node and extracting key-suffix mutation operators (<c>+=</c>, <c>*=</c>, etc.).
+/// </summary>
 public class YamlFormatParser : IConfigFormatParser
 {
+    /// <inheritdoc />
     public bool CanParse(string extension)
     {
         return string.Equals(extension, ".yaml", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(extension, ".yml", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <inheritdoc />
     public ConfigObjectNode Parse(string content, string? filePath = null)
     {
         if (string.IsNullOrWhiteSpace(content))
@@ -47,6 +53,9 @@ public class YamlFormatParser : IConfigFormatParser
         }
     }
 
+    /// <summary>
+    /// Converts a <see cref="YamlMappingNode"/> into a <see cref="ConfigObjectNode"/>, extracting any operator suffix from each key.
+    /// </summary>
     private ConfigObjectNode ConvertMapping(YamlMappingNode mapping, string? filePath, ConfigOperator op)
     {
         var objNode = new ConfigObjectNode(op, new SourceInfo(filePath, mapping.Start.Line, mapping.Start.Column));
@@ -58,6 +67,7 @@ public class YamlFormatParser : IConfigFormatParser
                 continue;
             }
 
+            // Extract operator suffix (e.g. "max_connections*=" -> cleanKey: "max_connections", keyOp: Multiply)
             var (cleanKey, keyOp) = OperatorParser.ParseKey(keyScalar.Value);
             var childNode = ConvertYamlNode(entry.Value, filePath, keyOp);
             objNode.SetChild(cleanKey, childNode);
@@ -91,6 +101,10 @@ public class YamlFormatParser : IConfigFormatParser
         }
     }
 
+    /// <summary>
+    /// Converts a <see cref="YamlScalarNode"/> into a typed <see cref="ConfigValueNode"/>.
+    /// Single- or double-quoted scalars are preserved as strings; unquoted scalars are inferred as null, boolean, 64-bit integer, or double.
+    /// </summary>
     private ConfigValueNode ConvertScalar(YamlScalarNode scalar, SourceInfo source, ConfigOperator op)
     {
         string? raw = scalar.Value;
@@ -106,6 +120,7 @@ public class YamlFormatParser : IConfigFormatParser
             return new ConfigValueNode(ConfigValueNode.MissingMarker, op, source);
         }
 
+        // Preserve explicit string type when the YAML value was enclosed in quotes (e.g. "12345" or 'true')
         if (isQuoted)
         {
             return new ConfigValueNode(raw ?? "", op, source);
@@ -117,13 +132,13 @@ public class YamlFormatParser : IConfigFormatParser
             return new ConfigValueNode(boolVal, op, source);
         }
 
-        // Try integer
+        // Try 64-bit integer
         if (long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out long longVal))
         {
             return new ConfigValueNode(longVal, op, source);
         }
 
-        // Try float / double (only if has decimal point or exponential to avoid false positives)
+        // Try floating-point (when decimal point or scientific notation 'e'/'E' is present)
         if ((raw!.Contains('.') || raw.Contains('e', StringComparison.OrdinalIgnoreCase)) &&
             double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out double doubleVal))
         {

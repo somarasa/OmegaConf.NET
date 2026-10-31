@@ -5,6 +5,13 @@ using OmegaConf.NET.Parsers;
 
 namespace OmegaConf.NET.Composition;
 
+/// <summary>
+/// Resolves hierarchical configuration composition from a directory tree, handling:
+/// - Hydra-style <c>defaults:</c> lists and <c>_self_</c> precedence ordering
+/// - Multi-level automatic folder cascading (e.g. <c>db/postgres.yaml</c> -> <c>db/cloud/postgres.yaml</c> -> <c>db/cloud/aws/postgres.yaml</c>)
+/// - Explicit inheritance via <c>_inherits_</c> or <c>_base_</c> (including cross-format inheritance)
+/// - Circular dependency detection via a canonical file path loading stack
+/// </summary>
 public class TreeResolver
 {
     private static readonly string[] SupportedExtensions = [".yaml", ".yml", ".json", ".jsonc", ".toml"];
@@ -13,14 +20,23 @@ public class TreeResolver
     private readonly ConfigFormatRegistry _registry;
     private readonly HashSet<string> _loadingStack = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="TreeResolver"/> class.
+    /// </summary>
+    /// <param name="registry">Optional custom format registry; defaults to <see cref="ConfigFormatRegistry.Default"/>.</param>
     public TreeResolver(ConfigFormatRegistry? registry = null)
     {
         _registry = registry ?? ConfigFormatRegistry.Default;
     }
 
     /// <summary>
-    /// Resolves and composes the configuration tree starting from root directory and entry file.
+    /// Resolves and composes the configuration tree starting from <paramref name="rootDir"/> and <paramref name="entryFile"/>.
     /// </summary>
+    /// <param name="rootDir">The root configuration directory.</param>
+    /// <param name="entryFile">The entrypoint configuration filename (defaults to <c>"config.yaml"</c>).</param>
+    /// <param name="selectedPaths">Optional config group path overrides supplied via builder or CLI.</param>
+    /// <param name="droppedGroups">Optional config group names to exclude (e.g. <c>~db</c>).</param>
+    /// <returns>The composed <see cref="ConfigObjectNode"/> prior to CLI value overrides and variable interpolation.</returns>
     public ConfigObjectNode Resolve(
         string rootDir,
         string entryFile = "config.yaml",
@@ -41,6 +57,11 @@ public class TreeResolver
         return LoadFileWithHierarchy(rootDir, fullEntryPath, activeSelections, activeDropped, isEntry: true);
     }
 
+    /// <summary>
+    /// Loads a single configuration file, resolves any explicit <c>_inherits_</c> base files,
+    /// and (if it is the entrypoint) processes its <c>defaults:</c> composition list.
+    /// Guards against circular inheritance using <see cref="_loadingStack"/>.
+    /// </summary>
     private ConfigObjectNode LoadFileWithHierarchy(
         string rootDir,
         string filePath,
@@ -58,7 +79,7 @@ public class TreeResolver
         {
             var rawNode = _registry.ParseFile(canonicalPath);
 
-            // Handle explicit inheritance (_inherits_ or _base_)
+            // Step 1: Resolve explicit inheritance (_inherits_ or _base_) if declared in this file
             var baseNode = ResolveExplicitInheritance(rootDir, Path.GetDirectoryName(canonicalPath)!, rawNode, selectedPaths, droppedGroups);
 
             ConfigObjectNode currentNode = baseNode != null
@@ -70,7 +91,7 @@ public class TreeResolver
                 return currentNode;
             }
 
-            // If this is the entry file, process defaults list and config groups
+            // Step 2: If this is the entrypoint file, process its defaults list and config groups
             var defaults = DefaultsListParser.Parse(currentNode);
             if (defaults.Count == 0)
             {
@@ -86,6 +107,10 @@ public class TreeResolver
         }
     }
 
+    /// <summary>
+    /// Merges all entries in the <c>defaults:</c> list in order, respecting the position of <c>_self_</c>.
+    /// Entries before <c>_self_</c> are overridden by the entry file; entries after <c>_self_</c> override the entry file.
+    /// </summary>
     private ConfigObjectNode ProcessDefaultsList(
         string rootDir,
         string entryFilePath,
@@ -94,11 +119,10 @@ public class TreeResolver
         Dictionary<string, string> selectedPaths,
         HashSet<string> droppedGroups)
     {
-        // Find if _self_ is explicitly listed
+        // Locate _self_ in the defaults list; if omitted, Hydra semantics place _self_ at the end
         int selfIndex = defaults.FindIndex(d => d.IsSelf);
         if (selfIndex < 0)
         {
-            // By default Hydra appends _self_ at the end
             selfIndex = defaults.Count;
         }
 
@@ -107,18 +131,18 @@ public class TreeResolver
 
         ConfigObjectNode composed = new(source: new SourceInfo(entryFilePath, 0, 0));
 
-        // 1. Apply defaults before _self_
+        // 1. Apply defaults listed before _self_
         foreach (var entry in beforeSelf)
         {
             ApplyDefaultEntry(composed, rootDir, entry, selectedPaths, droppedGroups);
         }
 
-        // 2. Apply _self_ (entry file)
+        // 2. Apply _self_ (the local properties of the entry file itself, excluding the 'defaults' key)
         var entryClone = (ConfigObjectNode)entryNode.Clone();
         entryClone.RemoveChild(DefaultsListParser.DefaultsKey);
         composed = (ConfigObjectNode)OperatorEngine.Apply(composed, entryClone);
 
-        // 3. Apply defaults after _self_
+        // 3. Apply defaults listed after _self_
         foreach (var entry in afterSelf)
         {
             ApplyDefaultEntry(composed, rootDir, entry, selectedPaths, droppedGroups);
@@ -127,6 +151,9 @@ public class TreeResolver
         return composed;
     }
 
+    /// <summary>
+    /// Resolves a single <see cref="DefaultsEntry"/> and mounts the resulting node under its group key on <paramref name="target"/>.
+    /// </summary>
     private void ApplyDefaultEntry(
         ConfigObjectNode target,
         string rootDir,
@@ -136,23 +163,20 @@ public class TreeResolver
     {
         if (string.IsNullOrEmpty(entry.Group)) return;
 
-        // Check if group is dropped via CLI (e.g. ~db)
+        // Skip if the group was dropped via CLI (~group) or builder.DropGroup(group)
         if (droppedGroups.Contains(entry.Group))
         {
             return;
         }
 
-        // Check if path is overridden by CLI or builder selection
+        // Check if the group's path was overridden via CLI (group=new/path) or builder.SelectPath(...)
         string subPath = selectedPaths.TryGetValue(entry.Group, out var overridePath)
             ? overridePath
             : entry.Path ?? entry.Group;
 
-        // Resolve group file with auto-cascading
         var groupNode = ResolveGroupWithCascading(rootDir, entry.Group, subPath, entry.IsOptional, selectedPaths, droppedGroups);
         if (groupNode != null)
         {
-            // Mount group into composed configuration:
-            // If the group has a key, mount it under target[group] or at root depending on whether the group is a container
             if (target.TryGetChild(entry.Group, out var existingGroupNode))
             {
                 target.SetChild(entry.Group, OperatorEngine.Apply(existingGroupNode, groupNode));
@@ -165,8 +189,11 @@ public class TreeResolver
     }
 
     /// <summary>
-    /// Loads a config group file, automatically cascading up parent directories with the same filename.
-    /// E.g. db/cloud/aws/postgres.yaml cascades on top of db/cloud/postgres.yaml and db/postgres.yaml.
+    /// Loads a config group file, automatically cascading down from parent directories that contain a file with the same name.
+    /// For example, selecting <c>db=cloud/aws/postgres</c> automatically loads and merges:
+    /// 1. <c>db/postgres.yaml</c> (if present)
+    /// 2. <c>db/cloud/postgres.yaml</c> (if present)
+    /// 3. <c>db/cloud/aws/postgres.yaml</c>
     /// </summary>
     private ConfigObjectNode? ResolveGroupWithCascading(
         string rootDir,
@@ -193,7 +220,7 @@ public class TreeResolver
 
         if (!string.IsNullOrEmpty(relativeSubDir))
         {
-            // Walk from groupDir down through each intermediate subdirectory (excluding the target file itself)
+            // Walk from groupDir down through each intermediate subdirectory (excluding the leaf file itself)
             string[] subSegments = relativeSubDir.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
             string currentCascadeDir = groupDir;
 
@@ -223,6 +250,9 @@ public class TreeResolver
         return currentNode;
     }
 
+    /// <summary>
+    /// Resolves explicit file inheritance declared via <c>_inherits_</c> or <c>_base_</c> (supports a single path or a list of paths).
+    /// </summary>
     private ConfigObjectNode? ResolveExplicitInheritance(
         string rootDir,
         string currentDir,
@@ -277,6 +307,10 @@ public class TreeResolver
         return null;
     }
 
+    /// <summary>
+    /// Searches for a configuration file in <paramref name="directory"/>, probing supported extensions
+    /// (<c>.yaml</c>, <c>.yml</c>, <c>.json</c>, <c>.jsonc</c>, <c>.toml</c>) when no extension is specified.
+    /// </summary>
     private static string? FindConfigFile(string directory, string filename)
     {
         if (File.Exists(filename)) return filename;

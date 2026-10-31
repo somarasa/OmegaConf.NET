@@ -6,13 +6,19 @@ using Tomlyn.Model;
 
 namespace OmegaConf.NET.Parsers;
 
+/// <summary>
+/// Parses TOML (<c>.toml</c>) configuration files into an OmegaConf <see cref="ConfigObjectNode"/> AST.
+/// Supports tables, nested table arrays, primitives, and key-suffix mutation operators.
+/// </summary>
 public class TomlFormatParser : IConfigFormatParser
 {
+    /// <inheritdoc />
     public bool CanParse(string extension)
     {
         return string.Equals(extension, ".toml", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <inheritdoc />
     public ConfigObjectNode Parse(string content, string? filePath = null)
     {
         if (string.IsNullOrWhiteSpace(content))

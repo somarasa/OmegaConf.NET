@@ -3,12 +3,19 @@ using OmegaConf.NET.Binding;
 
 namespace OmegaConf.NET.MultiRun;
 
+/// <summary>
+/// Represents a single parameter combination in a multi-run sweep matrix.
+/// </summary>
 public sealed record SweepCombination(IReadOnlyDictionary<string, string> Parameters);
 
+/// <summary>
+/// Implements Hydra-style multi-run parameter sweeps (<c>-m</c> / <c>--multirun</c>),
+/// computing the Cartesian product across comma-separated CLI overrides (e.g. <c>db=staging,prod workers=2,4,8</c>).
+/// </summary>
 public static class SweepEngine
 {
     /// <summary>
-    /// Checks if CLI args include the multi-run flag (-m or --multirun).
+    /// Checks if the CLI arguments include the multi-run flag (<c>-m</c> or <c>--multirun</c>).
     /// </summary>
     public static bool IsMultiRun(IEnumerable<string> args)
     {
@@ -16,7 +23,8 @@ public static class SweepEngine
     }
 
     /// <summary>
-    /// Filters out -m / --multirun and parses sweep parameters containing commas (e.g. "workers=2,4,8", "db=staging,prod").
+    /// Filters out <c>-m</c> / <c>--multirun</c> and separates static arguments from sweep parameters containing comma-separated choices.
+    /// Bracketed list literals (e.g. <c>tags=[a,b,c]</c>) are preserved as single non-sweep values.
     /// </summary>
     public static (List<string> NonSweepArgs, Dictionary<string, List<string>> SweepMatrix) ParseSweepArgs(IEnumerable<string> args)
     {
@@ -46,7 +54,7 @@ public static class SweepEngine
                 string key = arg[..eqIdx].Trim();
                 string rawValues = arg[(eqIdx + 1)..].Trim();
 
-                // Do not split bracketed list literals like tags=[a,b,c]
+                // Guard: Do not split bracketed list literals like tags=[a,b,c] into separate sweep runs
                 if (!(rawValues.StartsWith('[') && rawValues.EndsWith(']')))
                 {
                     var values = SplitTopLevelCommas(rawValues);
@@ -64,6 +72,9 @@ public static class SweepEngine
         return (nonSweepArgs, sweepMatrix);
     }
 
+    /// <summary>
+    /// Splits a comma-separated string only at top-level commas (outside of any nested brackets, parentheses, or braces).
+    /// </summary>
     private static List<string> SplitTopLevelCommas(string input)
     {
         var result = new List<string>();
@@ -90,7 +101,7 @@ public static class SweepEngine
     }
 
     /// <summary>
-    /// Generates the Cartesian product of all sweep parameters.
+    /// Generates the Cartesian product of all parameter lists in <paramref name="sweepMatrix"/>.
     /// </summary>
     public static List<Dictionary<string, string>> GenerateCartesianProduct(Dictionary<string, List<string>> sweepMatrix)
     {
@@ -106,6 +117,9 @@ public static class SweepEngine
         return result;
     }
 
+    /// <summary>
+    /// Recursive backtracking helper that populates <paramref name="accumulator"/> with every key-value permutation.
+    /// </summary>
     private static void GenerateCombinations(
         Dictionary<string, List<string>> matrix,
         List<string> keys,

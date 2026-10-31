@@ -9,10 +9,11 @@ Use this skill when you need to create, modify, or integrate configuration trees
 
 OmegaConf.NET brings the best features of Python's **Hydra** and **OmegaConf** to the .NET ecosystem:
 - Directory-based **Config Groups** and **Defaults Lists**.
-- **Automatic Cascading** and explicit inheritance (`_inherits_`).
+- **Multi-level Automatic Cascading** and cross-format explicit inheritance (`_inherits_`).
 - In-config **mutation operators** (`+=`, `-=`, `*=`, `/=`, `&=`, `|=`, `!=`).
-- **Variable interpolation** with relative dot navigation, literal escaping, `${eval:...}`, and `${env:...}`.
-- **Strict Structured Configs** binding to C# POCOs and records.
+- **Variable interpolation** with list indexing (`${servers[0]}`), relative dot navigation, literal escaping, `${eval:...}`, and `${env:...}`.
+- **Strict Structured Configs** binding to C# POCOs and positional `record` primary constructors.
+- **Format Agnostic Parsing & Serialization** across YAML, JSON/JSONC, and TOML (`.ToYaml()`, `.ToJson()`, `.ToToml()`).
 - Seamless **`Microsoft.Extensions.Configuration`** and DI integration.
 
 ---
@@ -166,6 +167,7 @@ public class DatabaseConfig
     public int Port { get; set; } = 5432;
     public int MaxConnections { get; set; }
     public TimeSpan Timeout { get; set; }
+    public Uri? EndpointUri { get; set; }
 }
 
 public class AppConfig

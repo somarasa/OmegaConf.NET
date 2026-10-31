@@ -4,13 +4,25 @@ using OmegaConf.NET.Common;
 
 namespace OmegaConf.NET.Operators;
 
+/// <summary>
+/// Executes in-config and CLI mutation operators (<c>=</c>, <c>+=</c>, <c>-=</c>, <c>*=</c>, <c>/=</c>, <c>&amp;=</c>, <c>|=</c>, <c>!=</c>)
+/// when merging an override <see cref="ConfigNode"/> onto an inherited base <see cref="ConfigNode"/>.
+/// All operations return newly cloned nodes and never mutate the input AST nodes in-place.
+/// </summary>
 public static class OperatorEngine
 {
     /// <summary>
-    /// Merges an override node onto a base node using the override node's Operator.
+    /// Merges an <paramref name="overrideNode"/> onto a <paramref name="baseNode"/> using the <see cref="ConfigNode.Operator"/>
+    /// declared on <paramref name="overrideNode"/>.
     /// </summary>
+    /// <param name="baseNode">The inherited base node, or <c>null</c> if the key did not exist in the base layer.</param>
+    /// <param name="overrideNode">The child or CLI override node carrying the mutation operator and operand value.</param>
+    /// <returns>A new <see cref="ConfigNode"/> representing the merged result.</returns>
+    /// <exception cref="InvalidOperatorException">Thrown when the operator is incompatible with the node types.</exception>
+    /// <exception cref="DivideByZeroException">Thrown when dividing a number by zero via <c>/=</c>.</exception>
     public static ConfigNode Apply(ConfigNode? baseNode, ConfigNode overrideNode)
     {
+        // If no base node exists yet, simply clone the override node as the initial value
         if (baseNode == null)
         {
             return overrideNode.Clone();
@@ -30,9 +42,12 @@ public static class OperatorEngine
         };
     }
 
+    /// <summary>
+    /// Applies standard assignment (<c>=</c>). Objects are merged recursively by key; scalars and lists replace the base.
+    /// </summary>
     private static ConfigNode ApplyAssign(ConfigNode baseNode, ConfigNode overrideNode)
     {
-        // When both are objects, recursively merge their children (hierarchical merge)
+        // When both base and override are objects, recursively merge their children (deep dictionary merge)
         if (baseNode is ConfigObjectNode baseObj && overrideNode is ConfigObjectNode overrideObj)
         {
             var result = (ConfigObjectNode)baseObj.Clone();
@@ -53,13 +68,20 @@ public static class OperatorEngine
             return result;
         }
 
-        // Otherwise scalar or list replaces the base
+        // Otherwise scalar or list replaces the base node completely
         return overrideNode.Clone();
     }
 
+    /// <summary>
+    /// Applies the addition operator (<c>+=</c>):
+    /// - Lists: appends items to the end of the base list.
+    /// - Objects: merges keys recursively.
+    /// - Numbers: performs arithmetic addition (preserving integer vs. floating-point type).
+    /// - Strings: concatenates strings.
+    /// </summary>
     private static ConfigNode ApplyAdd(ConfigNode baseNode, ConfigNode overrideNode)
     {
-        // List append
+        // Case 1: List append
         if (baseNode is ConfigListNode baseList)
         {
             var result = (ConfigListNode)baseList.Clone();
@@ -80,13 +102,13 @@ public static class OperatorEngine
             return result;
         }
 
-        // Object merge
+        // Case 2: Object merge
         if (baseNode is ConfigObjectNode baseObj && overrideNode is ConfigObjectNode overrideObj)
         {
             return ApplyAssign(baseObj, overrideObj);
         }
 
-        // Scalar add
+        // Case 3: Scalar numeric addition or string concatenation
         if (baseNode is ConfigValueNode baseVal && overrideNode is ConfigValueNode overrideVal)
         {
             if (TryPerformNumericOp(baseVal.Value, overrideVal.Value, (a, b) => a + b, (a, b) => a + b, out var numResult))
@@ -94,7 +116,7 @@ public static class OperatorEngine
                 return new ConfigValueNode(numResult, ConfigOperator.Assign, overrideNode.Source);
             }
 
-            // String concatenation
+            // Fallback to string concatenation
             string strA = baseVal.Value?.ToString() ?? "";
             string strB = overrideVal.Value?.ToString() ?? "";
             return new ConfigValueNode(strA + strB, ConfigOperator.Assign, overrideNode.Source);
@@ -103,9 +125,14 @@ public static class OperatorEngine
         throw new InvalidOperatorException("+=", baseNode.GetType().Name, $"Cannot add {overrideNode.GetType().Name} to {baseNode.GetType().Name}.", overrideNode.Source);
     }
 
+    /// <summary>
+    /// Applies the subtraction operator (<c>-=</c>):
+    /// - Lists: removes all items matching the override element(s).
+    /// - Numbers: performs arithmetic subtraction.
+    /// </summary>
     private static ConfigNode ApplySubtract(ConfigNode baseNode, ConfigNode overrideNode)
     {
-        // List item removal
+        // Case 1: List item removal by value match
         if (baseNode is ConfigListNode baseList)
         {
             var result = (ConfigListNode)baseList.Clone();
@@ -124,7 +151,7 @@ public static class OperatorEngine
             return result;
         }
 
-        // Numeric subtraction
+        // Case 2: Numeric subtraction
         if (baseNode is ConfigValueNode baseVal && overrideNode is ConfigValueNode overrideVal)
         {
             if (TryPerformNumericOp(baseVal.Value, overrideVal.Value, (a, b) => a - b, (a, b) => a - b, out var numResult))
@@ -136,6 +163,11 @@ public static class OperatorEngine
         throw new InvalidOperatorException("-=", baseNode.GetType().Name, $"Cannot subtract {overrideNode.GetType().Name} from {baseNode.GetType().Name}.", overrideNode.Source);
     }
 
+    /// <summary>
+    /// Applies the multiplication operator (<c>*=</c>):
+    /// - Numbers: performs arithmetic multiplication.
+    /// - Strings: repeats the base string N times (e.g. <c>"ha" *= 3</c> -> <c>"hahaha"</c>).
+    /// </summary>
     private static ConfigNode ApplyMultiply(ConfigNode baseNode, ConfigNode overrideNode)
     {
         if (baseNode is ConfigValueNode baseVal && overrideNode is ConfigValueNode overrideVal)
@@ -146,7 +178,7 @@ public static class OperatorEngine
                 return new ConfigValueNode(numResult, ConfigOperator.Assign, overrideNode.Source);
             }
 
-            // String repetition: "abc" *= 3 -> "abcabcabc"
+            // Python-style string repetition: "abc" *= 3 -> "abcabcabc"
             if (baseVal.Value is string s && TryParseInt(overrideVal.Value, out int count))
             {
                 string repeated = count > 0 ? string.Concat(Enumerable.Repeat(s, count)) : "";
@@ -157,6 +189,9 @@ public static class OperatorEngine
         throw new InvalidOperatorException("*=", baseNode.GetType().Name, $"Cannot multiply {baseNode.GetType().Name} by {overrideNode.GetType().Name}.", overrideNode.Source);
     }
 
+    /// <summary>
+    /// Applies the division operator (<c>/=</c>) on numeric values, throwing <see cref="DivideByZeroException"/> when divisor is zero.
+    /// </summary>
     private static ConfigNode ApplyDivide(ConfigNode baseNode, ConfigNode overrideNode)
     {
         if (baseNode is ConfigValueNode baseVal && overrideNode is ConfigValueNode overrideVal)
@@ -171,6 +206,9 @@ public static class OperatorEngine
         throw new InvalidOperatorException("/=", baseNode.GetType().Name, $"Cannot divide {baseNode.GetType().Name} by {overrideNode.GetType().Name}.", overrideNode.Source);
     }
 
+    /// <summary>
+    /// Applies logical AND (<c>&amp;=</c>) on booleans or bitwise AND on 64-bit integers.
+    /// </summary>
     private static ConfigNode ApplyBitwiseAnd(ConfigNode baseNode, ConfigNode overrideNode)
     {
         if (baseNode is ConfigValueNode baseVal && overrideNode is ConfigValueNode overrideVal)
@@ -189,6 +227,9 @@ public static class OperatorEngine
         throw new InvalidOperatorException("&=", baseNode.GetType().Name, "Bitwise AND is only supported for booleans and integers.", overrideNode.Source);
     }
 
+    /// <summary>
+    /// Applies logical OR (<c>|=</c>) on booleans or bitwise OR on 64-bit integers.
+    /// </summary>
     private static ConfigNode ApplyBitwiseOr(ConfigNode baseNode, ConfigNode overrideNode)
     {
         if (baseNode is ConfigValueNode baseVal && overrideNode is ConfigValueNode overrideVal)
@@ -207,6 +248,9 @@ public static class OperatorEngine
         throw new InvalidOperatorException("|=", baseNode.GetType().Name, "Bitwise OR is only supported for booleans and integers.", overrideNode.Source);
     }
 
+    /// <summary>
+    /// Applies boolean toggle / negation (<c>!=</c>), flipping <c>true</c> to <c>false</c> and <c>false</c> to <c>true</c>.
+    /// </summary>
     private static ConfigNode ApplyToggle(ConfigNode baseNode, ConfigNode overrideNode)
     {
         if (baseNode is ConfigValueNode baseVal)
@@ -220,6 +264,10 @@ public static class OperatorEngine
         throw new InvalidOperatorException("!=", baseNode.GetType().Name, "Toggle operator (!=) is only supported for booleans.", overrideNode.Source);
     }
 
+    /// <summary>
+    /// Attempts to execute a binary numeric operation. If either operand is floating-point, promotes both to <see cref="double"/>;
+    /// otherwise executes 64-bit integer arithmetic (<see cref="long"/>).
+    /// </summary>
     private static bool TryPerformNumericOp(
         object? a,
         object? b,

@@ -3,8 +3,13 @@ using OmegaConf.NET.Common;
 
 namespace OmegaConf.NET.Operators;
 
+/// <summary>
+/// Extracts mutation operators (<c>+=</c>, <c>-=</c>, <c>*=</c>, <c>/=</c>, <c>&amp;=</c>, <c>|=</c>, <c>!=</c>, <c>=</c>)
+/// from configuration key suffixes and command-line override expressions.
+/// </summary>
 public static class OperatorParser
 {
+    // Compound 2-character operators must precede simple '=' so they match greedily first.
     private static readonly (string Symbol, ConfigOperator Operator)[] SuffixOperators =
     [
         ("+=", ConfigOperator.Add),
@@ -56,15 +61,27 @@ public static class OperatorParser
 
         string trimmed = rawExpr.Trim();
 
-        foreach (var (symbol, op) in SuffixOperators)
+        // Find the earliest operator occurrence in the CLI argument string.
+        // Note: compound operators like "+=" at the same key boundary must be matched before "=".
+        int bestIdx = int.MaxValue;
+        (string Symbol, ConfigOperator Operator)? matchedOp = null;
+
+        foreach (var candidate in SuffixOperators)
         {
-            int idx = trimmed.IndexOf(symbol, StringComparison.Ordinal);
-            if (idx > 0)
+            int idx = trimmed.IndexOf(candidate.Symbol, StringComparison.Ordinal);
+            if (idx > 0 && idx < bestIdx)
             {
-                string path = trimmed[..idx].Trim();
-                string val = trimmed[(idx + symbol.Length)..].Trim();
-                return (path, op, val);
+                bestIdx = idx;
+                matchedOp = candidate;
             }
+        }
+
+        if (matchedOp.HasValue)
+        {
+            var (symbol, op) = matchedOp.Value;
+            string path = trimmed[..bestIdx].Trim();
+            string val = trimmed[(bestIdx + symbol.Length)..].Trim();
+            return (path, op, val);
         }
 
         throw new ConfigSyntaxException($"Expression '{rawExpr}' does not contain a valid operator (=, +=, -=, *=, /=, &=, |=, !=).");

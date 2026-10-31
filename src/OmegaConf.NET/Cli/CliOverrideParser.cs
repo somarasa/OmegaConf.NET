@@ -5,10 +5,16 @@ using OmegaConf.NET.Operators;
 
 namespace OmegaConf.NET.Cli;
 
+/// <summary>
+/// Parses command-line arguments (<c>args[]</c>) into two categories:
+/// 1. Pre-composition Config Group selections (<c>db=production/postgres</c> or <c>db=postgres</c>) and group exclusions (<c>~db</c>).
+/// 2. Post-composition deep property overrides and mutation operators (<c>db.port=5433</c>, <c>workers+=4</c>, <c>tags+=[gpu]</c>).
+/// </summary>
 public static class CliOverrideParser
 {
     /// <summary>
-    /// Parses CLI args to extract group choices (~group or group=path) before resolving the tree.
+    /// Scans CLI arguments before tree composition to extract group path selections (<c>group=path</c>)
+    /// and group exclusions (<c>~group</c>), placing remaining value overrides into <paramref name="remainingValueOverrides"/>.
     /// </summary>
     public static void ExtractGroupSelections(
         IEnumerable<string> args,
@@ -23,32 +29,33 @@ public static class CliOverrideParser
 
             string trimmed = arg.Trim();
 
-            // Check ~group (drop group)
+            // 1. Check Hydra tilde syntax (~group) to drop a config group from defaults
             if (trimmed.StartsWith('~'))
             {
                 droppedGroups.Add(trimmed[1..].Trim());
                 continue;
             }
 
-            // Parse operator to see if this is a plain '=' assignment
+            // 2. Parse the operator to distinguish plain '=' assignments from mutation operators (+=, *=, !=, etc.)
             var (path, op, val) = OperatorParser.ParseAssignment(trimmed);
             if (op == ConfigOperator.Assign && !path.Contains('.'))
             {
-                // Explicit subfolder path selection: e.g. db=staging/postgres
+                // Explicit subfolder path selection (e.g. db=staging/postgres)
                 if (val.Contains('/') || val.Contains('\\'))
                 {
                     selectedPaths[path] = val;
                     continue;
                 }
 
-                // If rootDir is provided and a matching config group folder exists, treat as a group selection
+                // If rootDir contains a subdirectory matching 'path' (e.g. configs/db/), treat as a config group selection
                 if (!string.IsNullOrEmpty(rootDir) && Directory.Exists(Path.Combine(rootDir, path)))
                 {
                     selectedPaths[path] = val;
                     continue;
                 }
 
-                // Otherwise record as candidate group selection AND keep as value override if not consumed as group
+                // Otherwise record as a candidate group selection AND keep in remainingValueOverrides
+                // in case it is a top-level scalar property (e.g. app_name=MyService)
                 selectedPaths[path] = val;
             }
 
@@ -57,7 +64,7 @@ public static class CliOverrideParser
     }
 
     /// <summary>
-    /// Applies remaining scalar and deep property overrides to the resolved configuration object.
+    /// Applies scalar, list, and deep dot-path property overrides (with mutation operators) to the composed configuration tree.
     /// </summary>
     public static void ApplyValueOverrides(ConfigObjectNode root, IEnumerable<string> overrideArgs)
     {
@@ -71,6 +78,10 @@ public static class CliOverrideParser
         }
     }
 
+    /// <summary>
+    /// Navigates (or creates) intermediate <see cref="ConfigObjectNode"/> containers along <paramref name="path"/>
+    /// and merges <paramref name="overrideNode"/> onto the target leaf property using <see cref="OperatorEngine"/>.
+    /// </summary>
     private static void SetDeepProperty(ConfigObjectNode root, string path, ConfigNode overrideNode)
     {
         string[] parts = path.Split('.', StringSplitOptions.RemoveEmptyEntries);
@@ -92,7 +103,7 @@ public static class CliOverrideParser
         string lastPart = parts[^1];
         if (current.TryGetChild(lastPart, out var existing))
         {
-            // Do not overwrite an already-composed config group object with a plain scalar CLI group name
+            // Guard: Do not overwrite an already-composed config group object with a plain scalar CLI group name
             if (parts.Length == 1 && existing is ConfigObjectNode && overrideNode is ConfigValueNode { Operator: ConfigOperator.Assign })
             {
                 return;
@@ -105,6 +116,10 @@ public static class CliOverrideParser
         }
     }
 
+    /// <summary>
+    /// Parses a raw CLI value string into a typed <see cref="ConfigNode"/> (supporting <c>???</c>, booleans,
+    /// 64-bit integers, floating-point numbers, bracketed lists <c>[a,b,c]</c>, and strings).
+    /// </summary>
     private static ConfigNode CreateNodeFromCliValue(string raw, ConfigOperator op)
     {
         var source = new SourceInfo("(cli)", 0, 0);
@@ -129,7 +144,7 @@ public static class CliOverrideParser
             return new ConfigValueNode(d, op, source);
         }
 
-        // Check if raw is list: [a, b, c]
+        // Parse bracketed CLI list literal: e.g. tags=[gpu,fast,cluster]
         if (raw.StartsWith('[') && raw.EndsWith(']'))
         {
             string inner = raw[1..^1];

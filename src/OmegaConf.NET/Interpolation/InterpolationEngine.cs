@@ -4,15 +4,29 @@ using OmegaConf.NET.Common;
 
 namespace OmegaConf.NET.Interpolation;
 
+/// <summary>
+/// Resolves variable references (<c>${path.to.key}</c>), list indexing (<c>${items[0]}</c>),
+/// relative dot navigation (<c>${.sibling}</c>, <c>${..parent}</c>), literal escaping (<c>\${...}</c>),
+/// default fallbacks (<c>${key:default}</c>), and custom resolvers (<c>${env:...}</c>, <c>${eval:...}</c>)
+/// across the composed configuration tree.
+/// </summary>
 public class InterpolationEngine : IInterpolationContext
 {
-    // Matches ${...} that is NOT preceded by an unescaped backslash
+    /// <summary>
+    /// Matches innermost <c>${...}</c> tokens that are NOT preceded by an escaping backslash (<c>\</c>).
+    /// </summary>
     private static readonly Regex InterpolationRegex = new(@"(?<!\\)\$\{([^{}]+)\}", RegexOptions.Compiled);
 
     private readonly ConfigObjectNode _root;
     private readonly Dictionary<string, IResolver> _resolvers = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _resolvingKeys = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="InterpolationEngine"/> class and registers the built-in
+    /// <see cref="EnvResolver"/> (<c>env</c>) and <see cref="EvalResolver"/> (<c>eval</c>).
+    /// </summary>
+    /// <param name="root">The root configuration object node to resolve against.</param>
+    /// <param name="resolvers">Optional additional custom resolvers.</param>
     public InterpolationEngine(ConfigObjectNode root, IEnumerable<IResolver>? resolvers = null)
     {
         _root = root;
@@ -28,16 +42,25 @@ public class InterpolationEngine : IInterpolationContext
         }
     }
 
+    /// <summary>
+    /// Registers a custom <see cref="IResolver"/> (overwriting any existing resolver with the same name).
+    /// </summary>
     public void RegisterResolver(IResolver resolver)
     {
         _resolvers[resolver.Name] = resolver;
     }
 
+    /// <summary>
+    /// Traverses the entire AST from the root node and resolves all variable interpolations in-place.
+    /// </summary>
     public void ResolveAll()
     {
         ResolveNode(_root, "");
     }
 
+    /// <summary>
+    /// Recursively walks a <see cref="ConfigNode"/> and resolves any string values containing <c>${...}</c> or <c>\${...}</c>.
+    /// </summary>
     private void ResolveNode(ConfigNode node, string currentPath)
     {
         switch (node)
@@ -61,7 +84,7 @@ public class InterpolationEngine : IInterpolationContext
             case ConfigValueNode val:
                 if (val.Value is string rawStr && (rawStr.Contains("${") || rawStr.Contains(@"\${")))
                 {
-                    // Ensure RawTemplate is preserved
+                    // Preserve the original unresolved formula on RawTemplate before mutating Value
                     val.RawTemplate ??= rawStr;
                     val.Value = ResolveStringValue(rawStr, currentPath, val.Source);
                 }
@@ -69,9 +92,13 @@ public class InterpolationEngine : IInterpolationContext
         }
     }
 
+    /// <summary>
+    /// Evaluates all interpolations within <paramref name="raw"/> while tracking <paramref name="currentPath"/>
+    /// to detect and prevent circular reference cycles.
+    /// </summary>
     public object? ResolveStringValue(string raw, string currentPath, SourceInfo source)
     {
-        // Check for cycle
+        // Guard against circular references (e.g. a: "${b}", b: "${a}")
         if (!string.IsNullOrEmpty(currentPath))
         {
             if (!_resolvingKeys.Add(currentPath))
@@ -82,14 +109,15 @@ public class InterpolationEngine : IInterpolationContext
 
         try
         {
-            // Case 1: Exact match - the whole string is a single interpolation "${...}" (potentially with nested "${...}" inside)
-            // Preserves the native type (returns int, bool, double, etc. rather than string)
+            // Case 1: Pure single interpolation "${...}" (potentially containing nested "${...}" inside)
+            // Preserves the native CLR type of the referenced node (int, bool, double, etc.) rather than converting to string
             if (IsSingleOuterInterpolation(raw, out string outerInner))
             {
                 return ResolveExpression(outerInner, currentPath, source);
             }
 
-            // Case 2: Embedded interpolation(s) or escaped interpolations
+            // Case 2: Embedded string interpolation(s) (e.g. "http://${host}:${port}/api") or escaped literals
+            // Iteratively replaces innermost ${...} tokens until all nested levels are resolved
             string result = raw;
             int maxIterations = 25;
             int iteration = 0;
@@ -104,7 +132,7 @@ public class InterpolationEngine : IInterpolationContext
                 });
             }
 
-            // Unescape \${...} to ${...}
+            // Unescape literal \${...} sequences into plain ${...} after evaluation
             if (result.Contains(@"\${"))
             {
                 result = result.Replace(@"\${", "${");
@@ -121,6 +149,10 @@ public class InterpolationEngine : IInterpolationContext
         }
     }
 
+    /// <summary>
+    /// Checks whether <paramref name="raw"/> is a single outer <c>${...}</c> token spanning the entire string
+    /// (as opposed to multiple adjacent tokens like <c>"${a}:${b}"</c>) by tracking brace nesting depth.
+    /// </summary>
     private static bool IsSingleOuterInterpolation(string raw, out string inner)
     {
         inner = "";
@@ -132,9 +164,10 @@ public class InterpolationEngine : IInterpolationContext
         int depth = 0;
         for (int i = 0; i < raw.Length; i++)
         {
+            // Ignore escaped \${ sequences
             if (raw[i] == '\\' && i + 2 < raw.Length && raw[i + 1] == '$' && raw[i + 2] == '{')
             {
-                i += 2; // skip escaped \${
+                i += 2;
                 continue;
             }
 
@@ -152,9 +185,9 @@ public class InterpolationEngine : IInterpolationContext
             else if (raw[i] == '}')
             {
                 depth--;
+                // If depth reaches 0 before the last character, there is text outside the first ${...} block
                 if (depth == 0 && i < raw.Length - 1)
                 {
-                    // Closed before the end of the string (e.g. "${a}...${b}")
                     return false;
                 }
             }
@@ -169,9 +202,16 @@ public class InterpolationEngine : IInterpolationContext
         return false;
     }
 
+    /// <summary>
+    /// Resolves the inner body of a single <c>${...}</c> expression:
+    /// 1. Expands any nested <c>${...}</c> tokens inside the expression first.
+    /// 2. Dispatches to a registered <see cref="IResolver"/> if prefixed with <c>resolverName:</c>.
+    /// 3. Otherwise resolves the config path (with optional <c>:default_value</c> fallback and relative dot navigation).
+    /// </summary>
     private object? ResolveExpression(string expr, string currentPath, SourceInfo source)
     {
-        // Resolve any inner nested interpolations first (e.g. "eval: ${batch_size} * ${num_gpus}")
+        // Step 1: Resolve any inner nested interpolations first (e.g. "eval: ${batch_size} * ${num_gpus}")
+        // without re-adding currentPath to _resolvingKeys
         if (expr.Contains("${"))
         {
             int maxIterations = 25;
@@ -187,7 +227,7 @@ public class InterpolationEngine : IInterpolationContext
             }
         }
 
-        // 1. Check if it's a resolver: e.g. "env:PORT" or "eval: 10 * 20"
+        // Step 2: Check if the expression invokes a registered resolver (e.g. "env:PORT" or "eval: 10 * 20")
         int colonIdx = expr.IndexOf(':');
         if (colonIdx > 0)
         {
@@ -199,7 +239,7 @@ public class InterpolationEngine : IInterpolationContext
             }
         }
 
-        // 2. Check for default fallback syntax: "${path.to.key:default_val}"
+        // Step 3: Check for default fallback syntax: "${path.to.key:default_val}"
         string path = expr;
         string? defaultValue = null;
         if (colonIdx > 0)
@@ -208,7 +248,7 @@ public class InterpolationEngine : IInterpolationContext
             defaultValue = expr[(colonIdx + 1)..].Trim();
         }
 
-        // 3. Resolve relative / sibling path (e.g. .port or ..host)
+        // Step 4: Convert relative/sibling dot path (e.g. .port or ..host) into an absolute dot path
         string absolutePath = ResolveAbsolutePath(path, currentPath);
 
         var resolvedNode = FindNodeByPath(_root, absolutePath);
@@ -228,9 +268,9 @@ public class InterpolationEngine : IInterpolationContext
                 throw new MissingValueMarkerException(absolutePath, valNode.Source);
             }
 
+            // If the target node hasn't been resolved yet and still contains ${...}, resolve it recursively
             if (valNode.Value is string s && s.Contains("${"))
             {
-                // Recursively resolve
                 return ResolveStringValue(s, absolutePath, valNode.Source);
             }
 
@@ -241,9 +281,10 @@ public class InterpolationEngine : IInterpolationContext
     }
 
     /// <summary>
-    /// Resolves OmegaConf dot syntax:
-    /// .sibling -> looks in parent container of currentPath
-    /// ..parent_sibling -> looks one container up
+    /// Resolves OmegaConf relative dot navigation syntax against <paramref name="currentPath"/>:
+    /// - <c>.sibling</c> (1 leading dot): resolves in the same enclosing object container.
+    /// - <c>..parent_key</c> (2 leading dots): resolves 1 container level up.
+    /// - N leading dots: resolves N-1 container levels up.
     /// </summary>
     private static string ResolveAbsolutePath(string path, string currentPath)
     {
@@ -260,19 +301,17 @@ public class InterpolationEngine : IInterpolationContext
 
         string relativeKey = path[dotCount..].TrimStart('.');
 
-        // Get container parts of currentPath (strip current property name)
+        // Split currentPath into container segments and strip the leaf property name itself
         var segments = string.IsNullOrEmpty(currentPath)
             ? []
             : currentPath.Split('.', StringSplitOptions.RemoveEmptyEntries).ToList();
 
         if (segments.Count > 0)
         {
-            segments.RemoveAt(segments.Count - 1); // remove current property itself
+            segments.RemoveAt(segments.Count - 1);
         }
 
-        // 1 dot (.key): stay in enclosing container
-        // 2 dots (..key): go up 1 parent container
-        // N dots: go up N-1 parent containers
+        // 1 dot (.key) stays in the current container; each additional dot ascends one parent container
         int levelsUp = dotCount - 1;
         while (levelsUp > 0 && segments.Count > 0)
         {
@@ -293,12 +332,14 @@ public class InterpolationEngine : IInterpolationContext
         return $"{string.Join('.', segments)}.{relativeKey}";
     }
 
+    /// <inheritdoc />
     public object? ResolvePath(string path)
     {
         var node = FindNodeByPath(_root, path);
         return node is ConfigValueNode val ? val.Value : node;
     }
 
+    /// <inheritdoc />
     public string ResolveCustom(string resolverName, string argument)
     {
         if (_resolvers.TryGetValue(resolverName, out var resolver))
@@ -308,6 +349,10 @@ public class InterpolationEngine : IInterpolationContext
         throw new KeyNotFoundException($"Custom resolver '{resolverName}' is not registered.");
     }
 
+    /// <summary>
+    /// Navigates the AST from <paramref name="root"/> along a dot-separated path,
+    /// supporting both bracket list indexing (<c>servers[0]</c>) and dot list indexing (<c>servers.0</c>).
+    /// </summary>
     private static ConfigNode? FindNodeByPath(ConfigObjectNode root, string path)
     {
         if (string.IsNullOrWhiteSpace(path)) return root;
@@ -317,7 +362,7 @@ public class InterpolationEngine : IInterpolationContext
 
         foreach (var part in parts)
         {
-            // Check for list index syntax: e.g. "endpoints[0]" or "matrix[1][2]"
+            // Case 1: Bracket list indexing (e.g. "endpoints[0]" or multi-dimensional "matrix[1][2]")
             int bracketIdx = part.IndexOf('[');
             if (bracketIdx >= 0 && part.EndsWith(']'))
             {
@@ -334,7 +379,6 @@ public class InterpolationEngine : IInterpolationContext
                     }
                 }
 
-                // Parse one or more [index] segments
                 string indicesPart = part[bracketIdx..];
                 while (indicesPart.StartsWith('['))
                 {
@@ -356,6 +400,7 @@ public class InterpolationEngine : IInterpolationContext
                     indicesPart = indicesPart[(closeIdx + 1)..];
                 }
             }
+            // Case 2: Dot list indexing (e.g. "servers.0")
             else if (current is ConfigListNode directList && int.TryParse(part, out int directIdx))
             {
                 if (directIdx >= 0 && directIdx < directList.Items.Count)
@@ -367,6 +412,7 @@ public class InterpolationEngine : IInterpolationContext
                     return null;
                 }
             }
+            // Case 3: Standard object child property lookup
             else if (current is ConfigObjectNode obj && obj.TryGetChild(part, out var next))
             {
                 current = next!;
