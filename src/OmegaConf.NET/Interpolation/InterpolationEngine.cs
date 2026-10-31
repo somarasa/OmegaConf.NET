@@ -6,7 +6,8 @@ namespace OmegaConf.NET.Interpolation;
 
 public class InterpolationEngine : IInterpolationContext
 {
-    private static readonly Regex InterpolationRegex = new(@"\$\{([^{}]+)\}", RegexOptions.Compiled);
+    // Matches ${...} that is NOT preceded by an unescaped backslash
+    private static readonly Regex InterpolationRegex = new(@"(?<!\\)\$\{([^{}]+)\}", RegexOptions.Compiled);
 
     private readonly ConfigObjectNode _root;
     private readonly Dictionary<string, IResolver> _resolvers = new(StringComparer.OrdinalIgnoreCase);
@@ -16,6 +17,7 @@ public class InterpolationEngine : IInterpolationContext
     {
         _root = root;
         RegisterResolver(new EnvResolver());
+        RegisterResolver(new EvalResolver());
 
         if (resolvers != null)
         {
@@ -57,8 +59,10 @@ public class InterpolationEngine : IInterpolationContext
                 break;
 
             case ConfigValueNode val:
-                if (val.Value is string rawStr && rawStr.Contains("${"))
+                if (val.Value is string rawStr && (rawStr.Contains("${") || rawStr.Contains(@"\${")))
                 {
+                    // Ensure RawTemplate is preserved
+                    val.RawTemplate ??= rawStr;
                     val.Value = ResolveStringValue(rawStr, currentPath, val.Source);
                 }
                 break;
@@ -79,17 +83,18 @@ public class InterpolationEngine : IInterpolationContext
         try
         {
             // Case 1: Exact match - the whole string is a single interpolation "${path.to.val}"
-            // This preserves the native type (e.g. returns int, bool, double rather than string)
+            // Preserves the native type (returns int, bool, double, etc. rather than string)
             var match = InterpolationRegex.Match(raw);
             if (match.Success && match.Index == 0 && match.Length == raw.Length)
             {
                 string inner = match.Groups[1].Value.Trim();
-                return ResolveExpression(inner, source);
+                var resolved = ResolveExpression(inner, currentPath, source);
+                return resolved;
             }
 
-            // Case 2: Embedded interpolation(s) inside a string: e.g. "http://${db.host}:${db.port}/api"
+            // Case 2: Embedded interpolation(s) or escaped interpolations
             string result = raw;
-            int maxIterations = 20; // Guard against deep nested expansion
+            int maxIterations = 25;
             int iteration = 0;
 
             while (InterpolationRegex.IsMatch(result) && iteration++ < maxIterations)
@@ -97,9 +102,15 @@ public class InterpolationEngine : IInterpolationContext
                 result = InterpolationRegex.Replace(result, m =>
                 {
                     string inner = m.Groups[1].Value.Trim();
-                    var resolved = ResolveExpression(inner, source);
+                    var resolved = ResolveExpression(inner, currentPath, source);
                     return resolved?.ToString() ?? "";
                 });
+            }
+
+            // Unescape \${...} to ${...}
+            if (result.Contains(@"\${"))
+            {
+                result = result.Replace(@"\${", "${");
             }
 
             return result;
@@ -113,9 +124,9 @@ public class InterpolationEngine : IInterpolationContext
         }
     }
 
-    private object? ResolveExpression(string expr, SourceInfo source)
+    private object? ResolveExpression(string expr, string currentPath, SourceInfo source)
     {
-        // Check if it's a resolver: e.g. "env:PORT" or "env:PORT, 8080"
+        // 1. Check if it's a resolver: e.g. "env:PORT" or "eval: 10 * 20"
         int colonIdx = expr.IndexOf(':');
         if (colonIdx > 0)
         {
@@ -126,13 +137,13 @@ public class InterpolationEngine : IInterpolationContext
                 // Resolve any nested interpolations inside the argument first
                 if (arg.Contains("${"))
                 {
-                    arg = ResolveStringValue(arg, "", source)?.ToString() ?? "";
+                    arg = ResolveStringValue(arg, currentPath, source)?.ToString() ?? "";
                 }
                 return resolver.Resolve(arg, this);
             }
         }
 
-        // Check for default fallback syntax: "${path.to.key:default_val}"
+        // 2. Check for default fallback syntax: "${path.to.key:default_val}"
         string path = expr;
         string? defaultValue = null;
         if (colonIdx > 0)
@@ -141,33 +152,89 @@ public class InterpolationEngine : IInterpolationContext
             defaultValue = expr[(colonIdx + 1)..].Trim();
         }
 
-        var resolvedNode = FindNodeByPath(_root, path);
+        // 3. Resolve relative / sibling path (e.g. .port or ..host)
+        string absolutePath = ResolveAbsolutePath(path, currentPath);
+
+        var resolvedNode = FindNodeByPath(_root, absolutePath);
         if (resolvedNode == null)
         {
             if (defaultValue != null)
             {
                 return defaultValue;
             }
-            throw new ConfigInterpolationException($"Cannot resolve reference '${{{expr}}}': path '{path}' does not exist.", source);
+            throw new ConfigInterpolationException($"Cannot resolve reference '${{{expr}}}': path '{absolutePath}' does not exist.", source);
         }
 
         if (resolvedNode is ConfigValueNode valNode)
         {
             if (valNode.IsMissingMarker)
             {
-                throw new MissingValueMarkerException(path, valNode.Source);
+                throw new MissingValueMarkerException(absolutePath, valNode.Source);
             }
 
             if (valNode.Value is string s && s.Contains("${"))
             {
                 // Recursively resolve
-                return ResolveStringValue(s, path, valNode.Source);
+                return ResolveStringValue(s, absolutePath, valNode.Source);
             }
 
             return valNode.Value;
         }
 
         return resolvedNode;
+    }
+
+    /// <summary>
+    /// Resolves OmegaConf dot syntax:
+    /// .sibling -> looks in parent container of currentPath
+    /// ..parent_sibling -> looks one container up
+    /// </summary>
+    private static string ResolveAbsolutePath(string path, string currentPath)
+    {
+        if (string.IsNullOrEmpty(path) || !path.StartsWith('.'))
+        {
+            return path;
+        }
+
+        int dotCount = 0;
+        while (dotCount < path.Length && path[dotCount] == '.')
+        {
+            dotCount++;
+        }
+
+        string relativeKey = path[dotCount..].TrimStart('.');
+
+        // Get container parts of currentPath (strip current property name)
+        var segments = string.IsNullOrEmpty(currentPath)
+            ? []
+            : currentPath.Split('.', StringSplitOptions.RemoveEmptyEntries).ToList();
+
+        if (segments.Count > 0)
+        {
+            segments.RemoveAt(segments.Count - 1); // remove current property itself
+        }
+
+        // 1 dot (.key): stay in enclosing container
+        // 2 dots (..key): go up 1 parent container
+        // N dots: go up N-1 parent containers
+        int levelsUp = dotCount - 1;
+        while (levelsUp > 0 && segments.Count > 0)
+        {
+            segments.RemoveAt(segments.Count - 1);
+            levelsUp--;
+        }
+
+        if (string.IsNullOrEmpty(relativeKey))
+        {
+            return string.Join('.', segments);
+        }
+
+        if (segments.Count == 0)
+        {
+            return relativeKey;
+        }
+
+        return $"{string.Join('.', segments)}.{relativeKey}";
     }
 
     public object? ResolvePath(string path)

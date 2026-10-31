@@ -25,6 +25,11 @@ public sealed class ConfigValueNode : ConfigNode
 
     public object? Value { get; set; }
 
+    /// <summary>
+    /// Preserves the raw unresolved template string (e.g. "${db.host}:${db.port}") for future write-back.
+    /// </summary>
+    public string? RawTemplate { get; set; }
+
     public bool IsMissingMarker => Value is string s && s == MissingMarker;
 
     public override ConfigNodeType NodeType => ConfigNodeType.Value;
@@ -32,11 +37,18 @@ public sealed class ConfigValueNode : ConfigNode
     public ConfigValueNode(object? value, ConfigOperator op = ConfigOperator.Assign, SourceInfo? source = null)
     {
         Value = value;
+        if (value is string s && s.Contains("${"))
+        {
+            RawTemplate = s;
+        }
         Operator = op;
         Source = source ?? SourceInfo.Unknown;
     }
 
-    public override ConfigNode Clone() => new ConfigValueNode(Value, Operator, Source);
+    public override ConfigNode Clone() => new ConfigValueNode(Value, Operator, Source)
+    {
+        RawTemplate = RawTemplate
+    };
 
     public override string ToString() => IsMissingMarker ? MissingMarker : Value?.ToString() ?? "null";
 }

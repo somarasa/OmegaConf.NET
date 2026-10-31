@@ -189,6 +189,34 @@ target_port: "${server.port}"
 cache_ttl: "${cache.timeout:300}"
 ```
 
+### Relative & Sibling Navigation (Dot Syntax)
+Refer to keys in the same object or parent objects without writing full paths:
+```yaml
+db:
+  host: "db.internal"
+  port: 5432
+  staging:
+    port: 5433
+    # '.port' resolves to sibling (5433)
+    # '..host' resolves to parent db.host ("db.internal")
+    connection: "Server=${..host};Port=${.port}"
+```
+
+### Literal Escaping (`\${...}`)
+Escape interpolations so they aren't evaluated (e.g. for shell scripts, regex, or templates):
+```yaml
+command: "echo \\${HOME} on port ${server.port}"  # Resolves to: "echo ${HOME} on port 8080"
+```
+
+### Expression & Math Evaluation (`${eval:...}`)
+Perform arithmetic, logic, and comparisons inside configs:
+```yaml
+batch_size: 32
+num_gpus: 4
+total_batch: "${eval: ${batch_size} * ${num_gpus}}"  # Resolves to 128
+timeout_calc: "${eval: 10 + 5 * 2}"                 # Resolves to 20
+```
+
 ### Environment Variables & Custom Resolvers
 ```yaml
 # Environment variable with fallback
