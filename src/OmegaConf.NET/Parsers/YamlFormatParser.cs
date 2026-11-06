@@ -51,6 +51,10 @@ public class YamlFormatParser : IConfigFormatParser
         {
             throw new ConfigSyntaxException(ex.Message, new SourceInfo(filePath, ex.Start.Line, ex.Start.Column), ex);
         }
+        catch (InvalidOperationException ex)
+        {
+            throw new ConfigSyntaxException(ex.Message, new SourceInfo(filePath, 0, 0), ex);
+        }
     }
 
     /// <summary>
@@ -130,6 +134,14 @@ public class YamlFormatParser : IConfigFormatParser
         if (bool.TryParse(raw, out bool boolVal))
         {
             return new ConfigValueNode(boolVal, op, source);
+        }
+
+        // YAML 1.1 boolean spellings (case-insensitive), matching OmegaConf/PyYAML semantics
+        string lower = raw!.ToLowerInvariant();
+        if (lower is "yes" or "no" or "on" or "off")
+        {
+            bool isOn = lower is "yes" or "on";
+            return new ConfigValueNode(isOn, op, source);
         }
 
         // Try 64-bit integer

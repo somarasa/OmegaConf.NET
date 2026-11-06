@@ -111,7 +111,7 @@ public static class OperatorEngine
         // Case 3: Scalar numeric addition or string concatenation
         if (baseNode is ConfigValueNode baseVal && overrideNode is ConfigValueNode overrideVal)
         {
-            if (TryPerformNumericOp(baseVal.Value, overrideVal.Value, (a, b) => a + b, (a, b) => a + b, out var numResult))
+            if (TryPerformNumericOp(baseVal.Value, overrideVal.Value, NumericBinaryOp.Add, out var numResult))
             {
                 return new ConfigValueNode(numResult, ConfigOperator.Assign, overrideNode.Source);
             }
@@ -154,7 +154,7 @@ public static class OperatorEngine
         // Case 2: Numeric subtraction
         if (baseNode is ConfigValueNode baseVal && overrideNode is ConfigValueNode overrideVal)
         {
-            if (TryPerformNumericOp(baseVal.Value, overrideVal.Value, (a, b) => a - b, (a, b) => a - b, out var numResult))
+            if (TryPerformNumericOp(baseVal.Value, overrideVal.Value, NumericBinaryOp.Subtract, out var numResult))
             {
                 return new ConfigValueNode(numResult, ConfigOperator.Assign, overrideNode.Source);
             }
@@ -173,7 +173,7 @@ public static class OperatorEngine
         if (baseNode is ConfigValueNode baseVal && overrideNode is ConfigValueNode overrideVal)
         {
             // Numeric multiplication
-            if (TryPerformNumericOp(baseVal.Value, overrideVal.Value, (a, b) => a * b, (a, b) => a * b, out var numResult))
+            if (TryPerformNumericOp(baseVal.Value, overrideVal.Value, NumericBinaryOp.Multiply, out var numResult))
             {
                 return new ConfigValueNode(numResult, ConfigOperator.Assign, overrideNode.Source);
             }
@@ -196,8 +196,7 @@ public static class OperatorEngine
     {
         if (baseNode is ConfigValueNode baseVal && overrideNode is ConfigValueNode overrideVal)
         {
-            if (TryPerformNumericOp(baseVal.Value, overrideVal.Value, (a, b) => b == 0 ? throw new DivideByZeroException("Configuration division by zero.") : a / b,
-                                                                   (a, b) => b == 0 ? throw new DivideByZeroException("Configuration division by zero.") : a / b, out var numResult))
+            if (TryPerformNumericOp(baseVal.Value, overrideVal.Value, NumericBinaryOp.Divide, out var numResult))
             {
                 return new ConfigValueNode(numResult, ConfigOperator.Assign, overrideNode.Source);
             }
@@ -266,13 +265,13 @@ public static class OperatorEngine
 
     /// <summary>
     /// Attempts to execute a binary numeric operation. If either operand is floating-point, promotes both to <see cref="double"/>;
-    /// otherwise executes 64-bit integer arithmetic (<see cref="long"/>).
+    /// otherwise executes 64-bit integer arithmetic (<see cref="long"/>), detecting overflow explicitly so results never
+    /// silently wrap around.
     /// </summary>
     private static bool TryPerformNumericOp(
         object? a,
         object? b,
-        Func<long, long, long> intOp,
-        Func<double, double, double> doubleOp,
+        NumericBinaryOp op,
         out object result)
     {
         result = 0;
@@ -285,7 +284,7 @@ public static class OperatorEngine
         {
             if (TryParseDouble(a, out double da) && TryParseDouble(b, out double db))
             {
-                result = doubleOp(da, db);
+                result = ApplyDoubleOp(da, db, op);
                 return true;
             }
         }
@@ -293,12 +292,92 @@ public static class OperatorEngine
         {
             if (TryParseLong(a, out long la) && TryParseLong(b, out long lb))
             {
-                result = intOp(la, lb);
+                result = ApplyLongOp(la, lb, op);
                 return true;
             }
         }
 
         return false;
+    }
+
+    private enum NumericBinaryOp
+    {
+        Add,
+        Subtract,
+        Multiply,
+        Divide,
+    }
+
+    private static long ApplyLongOp(long a, long b, NumericBinaryOp op)
+    {
+        switch (op)
+        {
+            case NumericBinaryOp.Add:
+            {
+                long result = a + b;
+                if (((a > 0 && b > 0 && result < 0) || (a < 0 && b < 0 && result > 0)))
+                {
+                    throw new OverflowException("Integer overflow in configuration arithmetic.");
+                }
+                return result;
+            }
+
+            case NumericBinaryOp.Subtract:
+            {
+                long result = a - b;
+                if (((a > 0 && b < 0 && result < 0) || (a < 0 && b > 0 && result > 0)))
+                {
+                    throw new OverflowException("Integer overflow in configuration arithmetic.");
+                }
+                return result;
+            }
+
+            case NumericBinaryOp.Multiply:
+            {
+                if (a != 0 && b != 0 && (a * b) / a != b)
+                {
+                    throw new OverflowException("Integer overflow in configuration arithmetic.");
+                }
+                return a * b;
+            }
+
+            case NumericBinaryOp.Divide:
+            {
+                if (b == 0)
+                {
+                    throw new DivideByZeroException("Configuration division by zero.");
+                }
+                if (a == long.MinValue && b == -1)
+                {
+                    throw new OverflowException("Integer overflow in configuration arithmetic.");
+                }
+                return a / b;
+            }
+
+            default:
+                throw new InvalidOperationException("Unsupported numeric operation.");
+        }
+    }
+
+    private static double ApplyDoubleOp(double a, double b, NumericBinaryOp op)
+    {
+        switch (op)
+        {
+            case NumericBinaryOp.Add:
+                return a + b;
+            case NumericBinaryOp.Subtract:
+                return a - b;
+            case NumericBinaryOp.Multiply:
+                return a * b;
+            case NumericBinaryOp.Divide:
+                if (b == 0.0)
+                {
+                    throw new DivideByZeroException("Configuration division by zero.");
+                }
+                return a / b;
+            default:
+                throw new InvalidOperationException("Unsupported numeric operation.");
+        }
     }
 
     private static bool TryParseBool(object? val, out bool b)

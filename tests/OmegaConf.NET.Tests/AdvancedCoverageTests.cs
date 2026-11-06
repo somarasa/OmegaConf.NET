@@ -64,59 +64,6 @@ public class DynamicTargetConfig
     public MemoryCacheService? Cache { get; set; }
 }
 
-public static class TestRunnerProgram
-{
-    public static int Main()
-    {
-        var asm = System.Reflection.Assembly.GetExecutingAssembly();
-        int passed = 0, failed = 0;
-
-        foreach (var type in asm.GetExportedTypes().Where(t => !t.IsAbstract && t != typeof(TestRunnerProgram)))
-        {
-            var methods = type.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-            foreach (var method in methods)
-            {
-                bool isFact = method.GetCustomAttributes(typeof(FactAttribute), false).Length > 0;
-                var inlineDatas = method.GetCustomAttributes(typeof(InlineDataAttribute), false).Cast<InlineDataAttribute>().ToList();
-
-                if (!isFact && inlineDatas.Count == 0) continue;
-
-                List<object?[]?> datasets = inlineDatas.Count > 0
-                    ? inlineDatas.Select(d => (object?[]?)d.GetData(method).First()).ToList()
-                    : [null];
-
-                foreach (var args in datasets)
-                {
-                    object? instance = Activator.CreateInstance(type);
-                    string label = args != null ? $"{type.Name}.{method.Name}({string.Join(", ", args)})" : $"{type.Name}.{method.Name}";
-                    try
-                    {
-                        var result = method.Invoke(instance, args);
-                        if (result is Task task)
-                        {
-                            task.GetAwaiter().GetResult();
-                        }
-                        Console.WriteLine($"  [PASS] {label}");
-                        passed++;
-                    }
-                    catch (System.Reflection.TargetInvocationException ex)
-                    {
-                        Console.WriteLine($"  [FAIL] {label}: {ex.InnerException?.GetType().Name} - {ex.InnerException?.Message}");
-                        failed++;
-                    }
-                    finally
-                    {
-                        if (instance is IDisposable d) d.Dispose();
-                    }
-                }
-            }
-        }
-
-        Console.WriteLine($"\nSummary ({System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription}): {passed} passed, {failed} failed, {passed + failed} total.");
-        return failed > 0 ? 1 : 0;
-    }
-}
-
 public class AdvancedCoverageTests : IDisposable
 {
     private readonly string _testDir;

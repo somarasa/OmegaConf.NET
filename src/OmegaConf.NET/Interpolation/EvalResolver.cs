@@ -212,7 +212,7 @@ public class EvalResolver : IResolver
                 {
                     var right = ParseUnary();
                     double dRight = ToDouble(right);
-                    if (dRight == 0.0) throw new DivideByZeroException("Division by zero in eval expression.");
+                    if (dRight == 0.0) throw new ConfigSyntaxException("Division by zero in eval expression.");
 
                     // Use exact integer division when evenly divisible; otherwise promote to double
                     if (IsInteger(left) && IsInteger(right) && (ToLong(left) % ToLong(right) == 0))
@@ -227,7 +227,16 @@ public class EvalResolver : IResolver
                 else if (Match("%"))
                 {
                     var right = ParseUnary();
-                    left = ToLong(left) % ToLong(right);
+                    double dRight = ToDouble(right);
+                    if (dRight == 0.0) throw new ConfigSyntaxException("Division by zero in eval expression.");
+                    if (IsInteger(left) && IsInteger(right))
+                    {
+                        left = ToLong(left) % ToLong(right);
+                    }
+                    else
+                    {
+                        left = ToDouble(left) % dRight;
+                    }
                 }
                 else
                 {
