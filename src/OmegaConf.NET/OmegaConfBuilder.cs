@@ -593,6 +593,11 @@ public class OmegaConfBuilder
                 }
             }
 
+            // Strip internal Hydra / OmegaConf framework metadata sections (hydra.searchpath, hydra.sweeper, hydra.aliases, hydra.callbacks)
+            // from the returned user configuration root, matching Python Hydra's separation of hydra.* from cfg.
+            composedRoot.RemoveChild("hydra");
+            composedRoot.RemoveChild("omegaconf");
+
             if (_readOnly)
             {
                 composedRoot.SetReadOnly(true);
@@ -662,8 +667,33 @@ public class OmegaConfBuilder
             .Select(a => a is "-m" or "--multirun" ? a : aliases.Expand(a))
             .ToList();
 
+        // Include any sweep parameters declared in hydra.sweeper.params / omegaconf.sweeper.params in the primary config
+        var combinedSweepArgs = new List<string>();
+        if (primaryRaw != null)
+        {
+            foreach (var secKey in new[] { "hydra", "omegaconf" })
+            {
+                if (primaryRaw.TryGetChild(secKey, out var secNode) &&
+                    secNode is ConfigObjectNode secObj &&
+                    secObj.TryGetChild("sweeper", out var sweeperNode) &&
+                    sweeperNode is ConfigObjectNode sweeperObj &&
+                    sweeperObj.TryGetChild("params", out var paramsNode) &&
+                    paramsNode is ConfigObjectNode paramsObj)
+                {
+                    foreach (var (paramKey, paramValNode) in paramsObj.Children)
+                    {
+                        if (paramValNode is ConfigValueNode vn && vn.Value != null)
+                        {
+                            combinedSweepArgs.Add(aliases.Expand($"{paramKey}={vn.Value}"));
+                        }
+                    }
+                }
+            }
+        }
+        combinedSweepArgs.AddRange(expandedSweepCliArgs);
+
         // Extract sweep matrix and static non-sweep arguments (passing _rootDir for glob() discovery)
-        var (nonSweepArgs, sweepMatrix) = MultiRun.SweepEngine.ParseSweepArgs(expandedSweepCliArgs, _rootDir);
+        var (nonSweepArgs, sweepMatrix) = MultiRun.SweepEngine.ParseSweepArgs(combinedSweepArgs, _rootDir);
         var combinations = MultiRun.SweepEngine.GenerateCartesianProduct(sweepMatrix);
 
         var callbackManager = new CallbackManager(_callbacks, primaryRaw, _whitelist);

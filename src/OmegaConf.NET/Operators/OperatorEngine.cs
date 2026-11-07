@@ -69,6 +69,13 @@ public static class OperatorEngine
         }
 
         // Otherwise scalar or list replaces the base node completely
+        // (Unless baseNode is a composed ConfigObjectNode and overrideNode is a null/missing uninitialized schema placeholder)
+        if (baseNode is ConfigObjectNode &&
+            overrideNode is ConfigValueNode { Value: null } or ConfigValueNode { IsMissingMarker: true })
+        {
+            return baseNode.Clone();
+        }
+
         return overrideNode.Clone();
     }
 

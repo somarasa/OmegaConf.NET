@@ -1,5 +1,6 @@
 <Project>
   <PropertyGroup>
+    <RepoRoot>$(MSBuildThisFileDirectory)</RepoRoot>
     <!-- Disable Roslyn compiler server named pipes for sandboxed execution -->
     <UseSharedCompilation>false</UseSharedCompilation>
     <LangVersion>latest</LangVersion>

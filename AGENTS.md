@@ -28,9 +28,10 @@ OmegaConf.NET/
 │   ├── OmegaConf.NET/                  # Core library (AST, Parsers, Operators, Resolvers, Binder)
 │   └── OmegaConf.NET.Extensions/       # Microsoft.Extensions.Configuration & DI provider
 ├── tests/
-│   └── OmegaConf.NET.Tests/            # Comprehensive unit and integration test suite (112 tests)
+│   └── OmegaConf.NET.Tests/            # Comprehensive unit and integration test suite (134 tests)
 └── samples/
-    └── QuickStart/                     # Runnable sample console application
+    ├── QuickStart/                     # Runnable sample console application
+    └── HydraExamples/                  # Complete C# port of the official Python Hydra examples (34 projects)
 ```
 
 ---

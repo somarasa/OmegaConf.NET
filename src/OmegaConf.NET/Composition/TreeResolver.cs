@@ -94,6 +94,15 @@ public class TreeResolver
             return LoadNodeWithHierarchy(rootDir, $"store://{storedEntry.Name}", storedEntry.Node, activeSelections, activeDropped, isEntry: true);
         }
 
+        // Support Hydra config-group-only apps (e.g. @hydra.main(config_path="conf") with no config.yaml)
+        // when the default entry file ("config.yaml") is used and rootDir contains config group subdirectories.
+        if (string.Equals(entryFile, "config.yaml", StringComparison.OrdinalIgnoreCase) &&
+            Directory.Exists(rootDir) &&
+            Directory.GetDirectories(rootDir).Length > 0)
+        {
+            return LoadNodeWithHierarchy(rootDir, Path.Combine(rootDir, "(empty_root)"), new ConfigObjectNode(), activeSelections, activeDropped, isEntry: true);
+        }
+
         throw new FileNotFoundException($"Entry configuration file '{entryFile}' not found in directory '{rootDir}' or in ConfigStore.");
     }
 
@@ -131,12 +140,13 @@ public class TreeResolver
     /// and processes its <c>defaults:</c> composition list if present.
     /// Guards against circular inheritance using <see cref="_loadingStack"/>.
     /// </summary>
-    private ConfigObjectNode LoadFileWithHierarchy(
+        private ConfigObjectNode LoadFileWithHierarchy(
         string rootDir,
         string filePath,
         Dictionary<string, string> selectedPaths,
         HashSet<string> droppedGroups,
-        bool isEntry = false)
+        bool isEntry = false,
+        string? enclosingGroup = null)
     {
         string canonicalPath = Path.GetFullPath(filePath);
         var rawNode = _registry.ParseFile(canonicalPath);
@@ -144,7 +154,7 @@ public class TreeResolver
         {
             OverrideAliases.ValidateNoAliasesInIncludedConfig(rawNode, canonicalPath);
         }
-        return LoadNodeWithHierarchy(rootDir, canonicalPath, rawNode, selectedPaths, droppedGroups, isEntry);
+        return LoadNodeWithHierarchy(rootDir, canonicalPath, rawNode, selectedPaths, droppedGroups, isEntry, enclosingGroup);
     }
 
     private ConfigObjectNode LoadNodeWithHierarchy(
@@ -153,7 +163,8 @@ public class TreeResolver
         ConfigObjectNode rawNode,
         Dictionary<string, string> selectedPaths,
         HashSet<string> droppedGroups,
-        bool isEntry = false)
+        bool isEntry = false,
+        string? enclosingGroup = null)
     {
         if (!_loadingStack.Add(canonicalId))
         {
@@ -167,7 +178,7 @@ public class TreeResolver
                 : (Path.GetDirectoryName(canonicalId) ?? rootDir);
 
             // Step 1: Resolve explicit inheritance (_inherits_ or _base_) if declared in this file
-            var baseNode = ResolveExplicitInheritance(rootDir, currentDir, rawNode, selectedPaths, droppedGroups);
+            var baseNode = ResolveExplicitInheritance(rootDir, currentDir, rawNode, selectedPaths, droppedGroups, enclosingGroup);
 
             ConfigObjectNode currentNode = baseNode != null
                 ? (ConfigObjectNode)OperatorEngine.Apply(baseNode, rawNode)
@@ -193,7 +204,7 @@ public class TreeResolver
                 return currentNode;
             }
 
-            return ProcessDefaultsList(rootDir, canonicalId, currentNode, defaults, selectedPaths, droppedGroups);
+            return ProcessDefaultsList(rootDir, canonicalId, currentNode, defaults, selectedPaths, droppedGroups, enclosingGroup);
         }
         finally
         {
@@ -217,6 +228,12 @@ public class TreeResolver
                     if (rawPath.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
                     {
                         rawPath = rawPath["file://".Length..].TrimStart('/');
+                    }
+                    else if (rawPath.StartsWith("pkg://", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string pkgRelative = rawPath["pkg://".Length..].TrimStart('/').Replace('.', Path.DirectorySeparatorChar);
+                        string parentCandidate = Path.GetFullPath(Path.Combine(rootDir, "..", pkgRelative));
+                        rawPath = Directory.Exists(parentCandidate) ? parentCandidate : pkgRelative;
                     }
                     string resolved = Path.IsPathRooted(rawPath) ? rawPath : Path.GetFullPath(Path.Combine(rootDir, rawPath));
                     if (!_searchPaths.Contains(resolved, StringComparer.OrdinalIgnoreCase))
@@ -281,7 +298,8 @@ public class TreeResolver
         ConfigObjectNode entryNode,
         List<DefaultsEntry> rawDefaults,
         Dictionary<string, string> selectedPaths,
-        HashSet<string> droppedGroups)
+        HashSet<string> droppedGroups,
+        string? enclosingGroup = null)
     {
         // Normalize 'override' entries:
         // 1. If an 'override' entry matches an earlier entry in the same defaults list, update that earlier entry in-place.
@@ -312,7 +330,9 @@ public class TreeResolver
                             entry.Package ?? defaults[existingIdx].Package,
                             isMissing: entry.IsMissing,
                             isDisabled: entry.IsDisabled,
-                            multiPaths: entry.MultiPaths);
+                            multiPaths: entry.MultiPaths,
+                            isRooted: entry.IsRooted || defaults[existingIdx].IsRooted,
+                            isBareSingle: entry.IsBareSingle && defaults[existingIdx].IsBareSingle);
                         continue;
                     }
                 }
@@ -348,7 +368,7 @@ public class TreeResolver
         foreach (var entry in beforeSelf)
         {
             if (entry.IsOverride && HasGroupAlreadyBeenMounted(composed, entry)) continue;
-            ApplyDefaultEntry(composed, entryClone, rootDir, entry, defaults, selectedPaths, droppedGroups, resolvedGroupChoices);
+            ApplyDefaultEntry(composed, entryClone, rootDir, entry, defaults, selectedPaths, droppedGroups, resolvedGroupChoices, enclosingGroup);
         }
 
         // 2. Apply _self_ (the local properties of the entry file itself, excluding the 'defaults' key)
@@ -358,7 +378,7 @@ public class TreeResolver
         foreach (var entry in afterSelf)
         {
             if (entry.IsOverride && HasGroupAlreadyBeenMounted(composed, entry)) continue;
-            ApplyDefaultEntry(composed, entryClone, rootDir, entry, defaults, selectedPaths, droppedGroups, resolvedGroupChoices);
+            ApplyDefaultEntry(composed, entryClone, rootDir, entry, defaults, selectedPaths, droppedGroups, resolvedGroupChoices, enclosingGroup);
         }
 
         return composed;
@@ -388,7 +408,8 @@ public class TreeResolver
         List<DefaultsEntry> allDefaults,
         Dictionary<string, string> selectedPaths,
         HashSet<string> droppedGroups,
-        Dictionary<string, string> resolvedGroupChoices)
+        Dictionary<string, string> resolvedGroupChoices,
+        string? enclosingGroup = null)
     {
         if (string.IsNullOrEmpty(entry.Group)) return;
 
@@ -495,12 +516,31 @@ public class TreeResolver
 
         foreach (var singleSubPath in pathsToLoad)
         {
-            var (groupNode, filePackageHeader) = ResolveGroupWithCascading(rootDir, entry.Group, singleSubPath, entry.IsOptional, selectedPaths, droppedGroups);
+            var (groupNode, filePackageHeader, isSameGroupMerge) = ResolveGroupWithCascading(
+                rootDir,
+                entry.Group,
+                singleSubPath,
+                entry.IsOptional,
+                selectedPaths,
+                droppedGroups,
+                enclosingGroup,
+                entry.IsRooted,
+                entry.IsBareSingle);
+
             if (groupNode != null)
             {
                 // Precedence for target package: explicit DefaultsEntry @package > file '# @package' header > group name
-                string targetPackage = entry.Package ?? filePackageHeader ?? entry.Group.Replace('/', '.');
-                if (targetPackage.Equals("_group_", StringComparison.OrdinalIgnoreCase))
+                string defaultPkg = isSameGroupMerge
+                    ? DefaultsEntry.HerePackage
+                    : entry.Group.Replace('/', '.');
+
+                string targetPackage = entry.Package ?? filePackageHeader ?? defaultPkg;
+                if (targetPackage.Equals(DefaultsEntry.HerePackage, StringComparison.OrdinalIgnoreCase) ||
+                    targetPackage.Equals(DefaultsEntry.GlobalPackage, StringComparison.OrdinalIgnoreCase))
+                {
+                    targetPackage = DefaultsEntry.GlobalPackage;
+                }
+                else if (targetPackage.Equals("_group_", StringComparison.OrdinalIgnoreCase))
                 {
                     targetPackage = entry.Group.Replace('/', '.');
                 }
@@ -617,25 +657,94 @@ public class TreeResolver
     /// Loads a config group file across the configured search paths, automatically cascading down from parent directories
     /// that contain a file with the same name. Also extracts any <c># @package</c> or <c>// @package</c> directive from the top of the leaf file.
     /// </summary>
-    private (ConfigObjectNode? Node, string? FilePackageHeader) ResolveGroupWithCascading(
+    private (ConfigObjectNode? Node, string? FilePackageHeader, bool IsSameGroupMerge) ResolveGroupWithCascading(
         string rootDir,
         string group,
         string subPath,
         bool isOptional,
         Dictionary<string, string> selectedPaths,
-        HashSet<string> droppedGroups)
+        HashSet<string> droppedGroups,
+        string? enclosingGroup = null,
+        bool isRooted = false,
+        bool isBareSingle = false)
     {
         string? resolvedFile = null;
         string matchedGroupDir = Path.Combine(rootDir, group);
+        string effectiveGroup = group;
+        bool isSameGroupMerge = false;
 
-        foreach (var sp in _searchPaths)
+        // 1. If we are inside an enclosing group (e.g. "server" or "db") and this default entry is not rooted with '/':
+        if (!string.IsNullOrEmpty(enclosingGroup) && !isRooted)
         {
-            string candidateGroupDir = Path.Combine(sp, group);
-            resolvedFile = FindConfigFile(candidateGroupDir, subPath);
-            if (resolvedFile != null)
+            // 1a. Check if a nested subgroup exists under enclosingGroup (e.g. server/db/mysql.yaml or server/site/fb.yaml)
+            string nestedGroup = $"{enclosingGroup}/{group}";
+            foreach (var sp in _searchPaths)
             {
-                matchedGroupDir = candidateGroupDir;
-                break;
+                string candidateGroupDir = Path.Combine(sp, nestedGroup);
+                resolvedFile = FindConfigFile(candidateGroupDir, subPath);
+                if (resolvedFile != null)
+                {
+                    matchedGroupDir = candidateGroupDir;
+                    effectiveGroup = nestedGroup;
+                    break;
+                }
+            }
+
+            if (resolvedFile == null && _configStore.TryLoad(nestedGroup, subPath, out var storedNested) && storedNested != null)
+            {
+                var composedNested = LoadNodeWithHierarchy(
+                    rootDir,
+                    $"store://{storedNested.Group}/{storedNested.Name}",
+                    storedNested.Node,
+                    selectedPaths,
+                    droppedGroups,
+                    enclosingGroup: nestedGroup);
+                return (composedNested, storedNested.Package, false);
+            }
+
+            // 1b. If this was a bare single-token default (e.g. "- base_mysql" inside db/mysql.yaml), check the same enclosingGroup!
+            if (resolvedFile == null && isBareSingle)
+            {
+                foreach (var sp in _searchPaths)
+                {
+                    string candidateSameDir = Path.Combine(sp, enclosingGroup);
+                    resolvedFile = FindConfigFile(candidateSameDir, subPath);
+                    if (resolvedFile != null)
+                    {
+                        matchedGroupDir = candidateSameDir;
+                        effectiveGroup = enclosingGroup;
+                        isSameGroupMerge = true;
+                        break;
+                    }
+                }
+
+                if (resolvedFile == null && _configStore.TryLoad(enclosingGroup, subPath, out var storedSame) && storedSame != null)
+                {
+                    var composedSame = LoadNodeWithHierarchy(
+                        rootDir,
+                        $"store://{storedSame.Group}/{storedSame.Name}",
+                        storedSame.Node,
+                        selectedPaths,
+                        droppedGroups,
+                        enclosingGroup: enclosingGroup);
+                    return (composedSame, storedSame.Package ?? DefaultsEntry.HerePackage, true);
+                }
+            }
+        }
+
+        // 2. Standard top-level search across _searchPaths
+        if (resolvedFile == null)
+        {
+            foreach (var sp in _searchPaths)
+            {
+                string candidateGroupDir = Path.Combine(sp, group);
+                resolvedFile = FindConfigFile(candidateGroupDir, subPath);
+                if (resolvedFile != null)
+                {
+                    matchedGroupDir = candidateGroupDir;
+                    effectiveGroup = group;
+                    break;
+                }
             }
         }
 
@@ -648,8 +757,9 @@ public class TreeResolver
                     $"store://{storedGroup.Group}/{storedGroup.Name}",
                     storedGroup.Node,
                     selectedPaths,
-                    droppedGroups);
-                return (composedStored, storedGroup.Package);
+                    droppedGroups,
+                    enclosingGroup: group);
+                return (composedStored, storedGroup.Package, false);
             }
 
             if (string.Equals(group, subPath, StringComparison.OrdinalIgnoreCase) &&
@@ -661,11 +771,12 @@ public class TreeResolver
                     $"store://{storedRoot.Name}",
                     storedRoot.Node,
                     selectedPaths,
-                    droppedGroups);
-                return (composedRootStored, storedRoot.Package ?? DefaultsEntry.GlobalPackage);
+                    droppedGroups,
+                    enclosingGroup: null);
+                return (composedRootStored, storedRoot.Package ?? DefaultsEntry.GlobalPackage, true);
             }
 
-            if (isOptional) return (null, null);
+            if (isOptional) return (null, null, false);
             throw new FileNotFoundException($"Configuration file for group '{group}' at path '{subPath}' was not found in '{matchedGroupDir}' or in ConfigStore.");
         }
 
@@ -687,7 +798,7 @@ public class TreeResolver
                 if (File.Exists(parentFileCandidate) &&
                     !string.Equals(Path.GetFullPath(parentFileCandidate), Path.GetFullPath(resolvedFile), StringComparison.OrdinalIgnoreCase))
                 {
-                    var layerNode = LoadFileWithHierarchy(rootDir, parentFileCandidate, selectedPaths, droppedGroups);
+                    var layerNode = LoadFileWithHierarchy(rootDir, parentFileCandidate, selectedPaths, droppedGroups, enclosingGroup: effectiveGroup);
                     accumulatedCascadeNode = accumulatedCascadeNode != null
                         ? (ConfigObjectNode)OperatorEngine.Apply(accumulatedCascadeNode, layerNode)
                         : layerNode;
@@ -697,14 +808,14 @@ public class TreeResolver
             }
         }
 
-        var currentNode = LoadFileWithHierarchy(rootDir, resolvedFile, selectedPaths, droppedGroups);
+        var currentNode = LoadFileWithHierarchy(rootDir, resolvedFile, selectedPaths, droppedGroups, enclosingGroup: effectiveGroup);
 
         if (accumulatedCascadeNode != null)
         {
-            return ((ConfigObjectNode)OperatorEngine.Apply(accumulatedCascadeNode, currentNode), filePackageHeader);
+            return ((ConfigObjectNode)OperatorEngine.Apply(accumulatedCascadeNode, currentNode), filePackageHeader, isSameGroupMerge);
         }
 
-        return (currentNode, filePackageHeader);
+        return (currentNode, filePackageHeader, isSameGroupMerge);
     }
 
     /// <summary>
@@ -754,7 +865,8 @@ public class TreeResolver
         string currentDir,
         ConfigObjectNode node,
         Dictionary<string, string> selectedPaths,
-        HashSet<string> droppedGroups)
+        HashSet<string> droppedGroups,
+        string? enclosingGroup = null)
     {
         foreach (var inheritKey in InheritKeys)
         {
@@ -790,7 +902,7 @@ public class TreeResolver
                         throw new FileNotFoundException($"Inherited configuration file '{relPath}' not found from '{currentDir}'.");
                     }
 
-                    var loaded = LoadFileWithHierarchy(rootDir, foundFile, selectedPaths, droppedGroups);
+                    var loaded = LoadFileWithHierarchy(rootDir, foundFile, selectedPaths, droppedGroups, enclosingGroup: enclosingGroup);
                     accumulatedBase = accumulatedBase != null
                         ? (ConfigObjectNode)OperatorEngine.Apply(accumulatedBase, loaded)
                         : loaded;

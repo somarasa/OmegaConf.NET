@@ -423,14 +423,18 @@ builder.Services.ConfigureOmegaConf<AppConfig>(omega =>
 
 ---
 
-## 🏃 Runnable Sample Project
+## 🏃 Runnable Sample Projects
 
+### 1. QuickStart Sample
 A complete, runnable console application demonstrating tree composition, auto-cascading, CLI overrides, diffing, and schema generation is available in [`samples/QuickStart`](samples/QuickStart).
 
 Run it with:
 ```bash
 dotnet run --project samples/QuickStart/QuickStart.csproj
 ```
+
+### 2. Official Hydra Examples Port (`samples/HydraExamples`)
+A complete C# port of the official Python Hydra example suite (34 runnable projects across `tutorials/basic`, `tutorials/structured_configs`, `instantiate`, `patterns`, and `advanced`) is available in [`samples/HydraExamples`](samples/HydraExamples), producing identical outputs to Python Hydra.
 
 ---
 

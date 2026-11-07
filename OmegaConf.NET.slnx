@@ -2,6 +2,114 @@
   <Folder Name="/samples/">
     <Project Path="samples/QuickStart/QuickStart.csproj" />
   </Folder>
+  <Folder Name="/samples/HydraExamples/" />
+  <Folder Name="/samples/HydraExamples/advanced/" />
+  <Folder Name="/samples/HydraExamples/advanced/ad_hoc_composition/">
+    <Project Path="samples/HydraExamples/advanced/ad_hoc_composition/HydraExamples.AdHocComposition.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/advanced/config_search_path/">
+    <Project Path="samples/HydraExamples/advanced/config_search_path/HydraExamples.ConfigSearchPath.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/advanced/defaults_list_interpolation/">
+    <Project Path="samples/HydraExamples/advanced/defaults_list_interpolation/HydraExamples.DefaultsListInterpolation.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/advanced/hydra_app_example/" />
+  <Folder Name="/samples/HydraExamples/advanced/hydra_app_example/hydra_app/">
+    <Project Path="samples/HydraExamples/advanced/hydra_app_example/hydra_app/HydraExamples.HydraAppExample.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/advanced/nested_defaults_list/">
+    <Project Path="samples/HydraExamples/advanced/nested_defaults_list/HydraExamples.NestedDefaultsList.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/advanced/package_overrides/">
+    <Project Path="samples/HydraExamples/advanced/package_overrides/HydraExamples.PackageOverridesSimple.csproj" />
+    <Project Path="samples/HydraExamples/advanced/package_overrides/HydraExamples.PackageOverridesTwoPackages.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/instantiate/" />
+  <Folder Name="/samples/HydraExamples/instantiate/docs_example/">
+    <Project Path="samples/HydraExamples/instantiate/docs_example/HydraExamples.DocsExample.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/instantiate/object/">
+    <Project Path="samples/HydraExamples/instantiate/object/HydraExamples.Object.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/instantiate/object_recursive/">
+    <Project Path="samples/HydraExamples/instantiate/object_recursive/HydraExamples.ObjectRecursive.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/instantiate/partial/">
+    <Project Path="samples/HydraExamples/instantiate/partial/HydraExamples.Partial.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/instantiate/schema/">
+    <Project Path="samples/HydraExamples/instantiate/schema/HydraExamples.Schema.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/instantiate/schema_recursive/">
+    <Project Path="samples/HydraExamples/instantiate/schema_recursive/HydraExamples.SchemaRecursive.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/patterns/" />
+  <Folder Name="/samples/HydraExamples/patterns/configuring_experiments/">
+    <Project Path="samples/HydraExamples/patterns/configuring_experiments/HydraExamples.ConfiguringExperiments.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/patterns/extending_configs/">
+    <Project Path="samples/HydraExamples/patterns/extending_configs/HydraExamples.ExtendingConfigs.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/patterns/multi-select/">
+    <Project Path="samples/HydraExamples/patterns/multi-select/HydraExamples.MultiSelect.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/patterns/specializing_config/">
+    <Project Path="samples/HydraExamples/patterns/specializing_config/HydraExamples.SpecializingConfig.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/patterns/write_protect_config_node/">
+    <Project Path="samples/HydraExamples/patterns/write_protect_config_node/HydraExamples.WriteProtectConfigNode.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/tutorials/" />
+  <Folder Name="/samples/HydraExamples/tutorials/basic/" />
+  <Folder Name="/samples/HydraExamples/tutorials/basic/running_your_hydra_app/" />
+  <Folder Name="/samples/HydraExamples/tutorials/basic/running_your_hydra_app/3_working_directory/">
+    <Project Path="samples/HydraExamples/tutorials/basic/running_your_hydra_app/3_working_directory/HydraExamples.OriginalCwd.csproj" />
+    <Project Path="samples/HydraExamples/tutorials/basic/running_your_hydra_app/3_working_directory/HydraExamples.WorkingDirectory.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/tutorials/basic/running_your_hydra_app/4_logging/">
+    <Project Path="samples/HydraExamples/tutorials/basic/running_your_hydra_app/4_logging/HydraExamples.Logging.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/tutorials/basic/running_your_hydra_app/5_basic_sweep/">
+    <Project Path="samples/HydraExamples/tutorials/basic/running_your_hydra_app/5_basic_sweep/HydraExamples.BasicSweep.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/tutorials/basic/your_first_hydra_app/" />
+  <Folder Name="/samples/HydraExamples/tutorials/basic/your_first_hydra_app/1_simple_cli/">
+    <Project Path="samples/HydraExamples/tutorials/basic/your_first_hydra_app/1_simple_cli/HydraExamples.SimpleCli.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/tutorials/basic/your_first_hydra_app/2_config_file/">
+    <Project Path="samples/HydraExamples/tutorials/basic/your_first_hydra_app/2_config_file/HydraExamples.ConfigFile.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/tutorials/basic/your_first_hydra_app/3_using_config/">
+    <Project Path="samples/HydraExamples/tutorials/basic/your_first_hydra_app/3_using_config/HydraExamples.UsingConfig.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/tutorials/basic/your_first_hydra_app/4_config_groups/">
+    <Project Path="samples/HydraExamples/tutorials/basic/your_first_hydra_app/4_config_groups/HydraExamples.ConfigGroups.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/tutorials/basic/your_first_hydra_app/5_defaults/">
+    <Project Path="samples/HydraExamples/tutorials/basic/your_first_hydra_app/5_defaults/HydraExamples.Defaults.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/tutorials/basic/your_first_hydra_app/6_composition/">
+    <Project Path="samples/HydraExamples/tutorials/basic/your_first_hydra_app/6_composition/HydraExamples.Composition.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/tutorials/structured_configs/" />
+  <Folder Name="/samples/HydraExamples/tutorials/structured_configs/1_minimal/">
+    <Project Path="samples/HydraExamples/tutorials/structured_configs/1_minimal/HydraExamples.Minimal.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/tutorials/structured_configs/2_static_complex/">
+    <Project Path="samples/HydraExamples/tutorials/structured_configs/2_static_complex/HydraExamples.StaticComplex.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/tutorials/structured_configs/3_config_groups/">
+    <Project Path="samples/HydraExamples/tutorials/structured_configs/3_config_groups/HydraExamples.ConfigGroupsStructured.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/tutorials/structured_configs/4_defaults/">
+    <Project Path="samples/HydraExamples/tutorials/structured_configs/4_defaults/HydraExamples.DefaultsStructured.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/tutorials/structured_configs/5.1_structured_config_schema_same_config_group/">
+    <Project Path="samples/HydraExamples/tutorials/structured_configs/5.1_structured_config_schema_same_config_group/HydraExamples.SchemaSameGroup.csproj" />
+  </Folder>
+  <Folder Name="/samples/HydraExamples/tutorials/structured_configs/5.2_structured_config_schema_different_config_group/">
+    <Project Path="samples/HydraExamples/tutorials/structured_configs/5.2_structured_config_schema_different_config_group/HydraExamples.SchemaDifferentGroup.csproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/OmegaConf.NET.Extensions/OmegaConf.NET.Extensions.csproj" />
     <Project Path="src/OmegaConf.NET/OmegaConf.NET.csproj" />

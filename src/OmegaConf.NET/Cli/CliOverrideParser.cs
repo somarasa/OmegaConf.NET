@@ -396,7 +396,7 @@ public static class CliOverrideParser
                 return;
             }
 
-            if (isStrictAppend && !(existing is ConfigValueNode { Value: null }))
+            if (isStrictAppend && !(existing is ConfigValueNode { Value: null } || existing is ConfigValueNode { IsMissingMarker: true }))
             {
                 throw new ConfigStructException(
                     path,

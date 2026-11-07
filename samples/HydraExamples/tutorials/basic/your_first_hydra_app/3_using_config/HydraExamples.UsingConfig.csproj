@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>UsingConfig</AssemblyName>
+    <RootNamespace>HydraExamples.UsingConfig</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(RepoRoot)src\OmegaConf.NET\OmegaConf.NET.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <None Update="conf/**\*;*.yaml;*.toml;*.json;*.jsonc" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

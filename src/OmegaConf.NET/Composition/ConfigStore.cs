@@ -406,11 +406,36 @@ public sealed class ConfigStore
     private static ConfigObjectNode ConvertPocoToObjectNode(object instance, Type type, SourceInfo src)
     {
         var objNode = new ConfigObjectNode(source: src);
-        var props = type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                        .Where(p => p.CanRead && p.GetCustomAttribute<ConfigIgnoreAttribute>() == null);
 
-        foreach (var prop in props)
+        // Build hierarchy from base class to derived class so base properties appear first in YAML order,
+        // while shadowed ('new') or overridden properties in derived classes take their value from the most-derived declaration.
+        var hierarchy = new List<Type>();
+        for (var t = type; t != null && t != typeof(object); t = t.BaseType)
         {
+            hierarchy.Add(t);
+        }
+        hierarchy.Reverse();
+
+        var orderedPropNames = new List<string>();
+        var mostDerivedProps = new Dictionary<string, PropertyInfo>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var levelType in hierarchy)
+        {
+            var declared = levelType.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+                                    .Where(p => p.CanRead && p.GetCustomAttribute<ConfigIgnoreAttribute>() == null);
+            foreach (var prop in declared)
+            {
+                if (!mostDerivedProps.ContainsKey(prop.Name))
+                {
+                    orderedPropNames.Add(prop.Name);
+                }
+                mostDerivedProps[prop.Name] = prop;
+            }
+        }
+
+        foreach (var propName in orderedPropNames)
+        {
+            var prop = mostDerivedProps[propName];
             string key = prop.GetCustomAttribute<ConfigKeyAttribute>()?.Key
                          ?? ConfigBinder.ToSnakeCase(prop.Name);
             bool isRequired = prop.GetCustomAttribute<ConfigRequiredAttribute>() != null;
@@ -418,6 +443,11 @@ public sealed class ConfigStore
 
             if (val == null && isRequired)
             {
+                objNode.SetChild(key, new ConfigValueNode(ConfigValueNode.MissingMarker, source: src), allowNewKeyInStruct: true);
+            }
+            else if (val == null && prop.PropertyType == typeof(object))
+            {
+                // Untyped group placeholder (equivalent to Python's `db: Any = MISSING`), e.g. `public object Db { get; set; } = null!;`
                 objNode.SetChild(key, new ConfigValueNode(ConfigValueNode.MissingMarker, source: src), allowNewKeyInStruct: true);
             }
             else

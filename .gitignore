@@ -46,5 +46,6 @@ Thumbs.db
 *.snupkg
 nupkgs/
 
-# Generated sample schema
+# Generated sample schema & outputs
 samples/QuickStart/configs/config.schema.json
+[Oo]utputs/

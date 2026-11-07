@@ -26,9 +26,25 @@ public sealed class DefaultsEntry
     public const string GroupPackage = "_group_";
 
     /// <summary>
+    /// Special Hydra package keyword (<c>"_here_"</c>) indicating that the loaded config should be merged into the enclosing file's own package.
+    /// </summary>
+    public const string HerePackage = "_here_";
+
+    /// <summary>
     /// Gets the configuration group folder name (e.g. <c>"db"</c>).
     /// </summary>
     public string? Group { get; init; }
+
+    /// <summary>
+    /// Gets a value indicating whether the group path in the defaults list began with a leading <c>'/'</c> (e.g. <c>- /db_schema/base_mysql@_here_</c>),
+    /// forcing resolution from the root configuration directory rather than the enclosing group folder.
+    /// </summary>
+    public bool IsRooted { get; init; }
+
+    /// <summary>
+    /// Gets a value indicating whether this entry was written as a bare single-segment name without a slash or mapping colon (e.g. <c>- base_mysql</c>).
+    /// </summary>
+    public bool IsBareSingle { get; init; }
 
     /// <summary>
     /// Gets the relative path within the group folder (e.g. <c>"staging/postgres"</c>).
@@ -92,8 +108,11 @@ public sealed class DefaultsEntry
         bool isOverride = false,
         bool isMissing = false,
         bool isDisabled = false,
-        IReadOnlyList<string>? multiPaths = null)
+        IReadOnlyList<string>? multiPaths = null,
+        bool isRooted = false,
+        bool isBareSingle = false)
     {
+        bool rooted = isRooted || group.Trim().StartsWith('/');
         string normalizedGroup = group.Trim().TrimStart('/');
         string? normalizedPkg = ExpandGroupPackageKeyword(normalizedGroup, package);
         return new()
@@ -105,7 +124,9 @@ public sealed class DefaultsEntry
             IsOverride = isOverride,
             IsMissing = isMissing,
             IsDisabled = isDisabled,
-            MultiPaths = multiPaths
+            MultiPaths = multiPaths,
+            IsRooted = rooted,
+            IsBareSingle = isBareSingle
         };
     }
 
@@ -174,6 +195,7 @@ public static class DefaultsListParser
                 else
                 {
                     ExtractDefaultKeywords(ref trimmed, out bool isOptional, out bool isOverride);
+                    bool isRooted = trimmed.StartsWith('/');
                     trimmed = trimmed.TrimStart('/');
 
                     SplitPackage(trimmed, out string withoutPkg, out string? pkg);
@@ -184,11 +206,11 @@ public static class DefaultsListParser
                         string group = withoutPkg[..slashIdx];
                         string path = withoutPkg[(slashIdx + 1)..];
                         SplitPackage(group, out group, out string? groupPkg);
-                        result.Add(DefaultsEntry.GroupChoice(group, path, isOptional, pkg ?? groupPkg, isOverride));
+                        result.Add(DefaultsEntry.GroupChoice(group, path, isOptional, pkg ?? groupPkg, isOverride, isRooted: isRooted));
                     }
                     else
                     {
-                        result.Add(DefaultsEntry.GroupChoice(withoutPkg, withoutPkg, isOptional, pkg, isOverride));
+                        result.Add(DefaultsEntry.GroupChoice(withoutPkg, withoutPkg, isOptional, pkg, isOverride, isRooted: isRooted, isBareSingle: true));
                     }
                 }
             }

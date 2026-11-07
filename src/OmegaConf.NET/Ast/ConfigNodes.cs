@@ -459,5 +459,17 @@ public sealed class ConfigObjectNode : ConfigNode
     }
 
     /// <inheritdoc />
-    public override string ToString() => $"{{{string.Join(", ", Children.Select(kv => $"{kv.Key}: {kv.Value}"))}}}";
+    public override string ToString() => $"{{{string.Join(", ", Children.Select(kv => $"'{kv.Key}': {FormatPythonValue(kv.Value)}"))}}}";
+
+    private static string FormatPythonValue(ConfigNode node) => node switch
+    {
+        ConfigValueNode { IsMissingMarker: true } => "'???'",
+        ConfigValueNode { Value: string s } => $"'{s}'",
+        ConfigValueNode { Value: bool b } => b ? "True" : "False",
+        ConfigValueNode { Value: null } => "None",
+        ConfigValueNode vn => Convert.ToString(vn.Value, System.Globalization.CultureInfo.InvariantCulture) ?? "None",
+        ConfigListNode ln => $"[{string.Join(", ", ln.Items.Select(FormatPythonValue))}]",
+        ConfigObjectNode on => on.ToString(),
+        _ => "None"
+    };
 }
