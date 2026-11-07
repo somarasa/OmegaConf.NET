@@ -1,5 +1,6 @@
 # OmegaConf.NET 🚀
 
+[![CI](https://github.com/somarasa/OmegaConf.NET/actions/workflows/ci.yml/badge.svg)](https://github.com/somarasa/OmegaConf.NET/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%209.0%20%7C%2010.0-purple.svg)](https://dotnet.microsoft.com/)
 
