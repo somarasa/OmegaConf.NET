@@ -38,3 +38,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `ConfigDiffer` for hierarchical configuration comparison (`+`, `-`, `~`).
   - `JsonSchemaGenerator` for Draft-07 IDE auto-complete schemas.
 - **Microsoft.Extensions.Configuration & DI Integration**: `AddOmegaConf` and `ConfigureOmegaConf<T>` extension methods in `OmegaConf.NET.Extensions`.
+- **Official Hydra Examples Suite (`samples/HydraExamples`)**: Complete C# port of the 34 official Python Hydra example projects (`tutorials/basic`, `tutorials/structured_configs`, `instantiate`, `patterns`, and `advanced`) verified for 100% output parity with Python Hydra.
