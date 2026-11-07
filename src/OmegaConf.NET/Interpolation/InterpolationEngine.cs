@@ -350,10 +350,8 @@ public class InterpolationEngine : IInterpolationContext
 
         string relativeKey = path[dotCount..].TrimStart('.');
 
-        // Split currentPath into container segments and strip the leaf property name itself
-        var segments = string.IsNullOrEmpty(currentPath)
-            ? []
-            : currentPath.Split('.', StringSplitOptions.RemoveEmptyEntries).ToList();
+        // Split currentPath into container segments (including bracketed list indices like items[0]) and strip the leaf segment itself
+        var segments = SplitPathSegments(currentPath);
 
         if (segments.Count > 0)
         {
@@ -370,7 +368,7 @@ public class InterpolationEngine : IInterpolationContext
 
         if (string.IsNullOrEmpty(relativeKey))
         {
-            return string.Join('.', segments);
+            return JoinPathSegments(segments);
         }
 
         if (segments.Count == 0)
@@ -378,7 +376,57 @@ public class InterpolationEngine : IInterpolationContext
             return relativeKey;
         }
 
-        return $"{string.Join('.', segments)}.{relativeKey}";
+        return $"{JoinPathSegments(segments)}.{relativeKey}";
+    }
+
+    private static List<string> SplitPathSegments(string currentPath)
+    {
+        var result = new List<string>();
+        if (string.IsNullOrEmpty(currentPath)) return result;
+
+        foreach (var dotPart in currentPath.Split('.', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int bracketIdx = dotPart.IndexOf('[');
+            if (bracketIdx < 0)
+            {
+                result.Add(dotPart);
+                continue;
+            }
+
+            if (bracketIdx > 0)
+            {
+                result.Add(dotPart[..bracketIdx]);
+            }
+
+            string rest = dotPart[bracketIdx..];
+            while (rest.StartsWith('['))
+            {
+                int closeIdx = rest.IndexOf(']');
+                if (closeIdx < 0) break;
+                result.Add(rest[..(closeIdx + 1)]);
+                rest = rest[(closeIdx + 1)..];
+            }
+        }
+
+        return result;
+    }
+
+    private static string JoinPathSegments(List<string> segments)
+    {
+        if (segments.Count == 0) return "";
+        var sb = new System.Text.StringBuilder(segments[0]);
+        for (int i = 1; i < segments.Count; i++)
+        {
+            if (segments[i].StartsWith('['))
+            {
+                sb.Append(segments[i]);
+            }
+            else
+            {
+                sb.Append('.').Append(segments[i]);
+            }
+        }
+        return sb.ToString();
     }
 
     /// <inheritdoc />

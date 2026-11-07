@@ -58,9 +58,64 @@ public sealed class DefaultsEntry
     public string? Package { get; init; }
 
     /// <summary>
+    /// Gets the raw unexpanded <c>@package</c> directive as written in the defaults list (e.g. <c>"_group_"</c> or <c>"_group_.suffix"</c>),
+    /// if different from the expanded <see cref="Package"/>.
+    /// </summary>
+    public string? RawPackage { get; init; }
+
+    /// <summary>
     /// Gets the unique selection key for CLI/builder overrides (<c>"group@package"</c> if <see cref="Package"/> is set, otherwise <see cref="Group"/>).
     /// </summary>
     public string SelectionKey => string.IsNullOrEmpty(Package) ? (Group ?? "") : $"{Group}@{Package}";
+
+    /// <summary>
+    /// Gets a value indicating whether the given CLI override key (e.g. <c>"preprocess@_group_"</c>, <c>"preprocess@_group_.suffix"</c>,
+    /// <c>"preprocess@preprocess"</c>, or <c>"preprocess"</c>) matches this default entry.
+    /// </summary>
+    public bool MatchesOverrideKey(string candidateKey)
+    {
+        if (string.IsNullOrWhiteSpace(candidateKey)) return false;
+        string cleanCandidate = candidateKey.Trim().TrimStart('+').TrimStart('/');
+
+        if (string.Equals(cleanCandidate, SelectionKey, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (string.IsNullOrEmpty(Package) && string.Equals(cleanCandidate, Group, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (!string.IsNullOrEmpty(RawPackage))
+        {
+            string rawSelectionKey = string.IsNullOrEmpty(Group) ? $"@{RawPackage}" : $"{Group}@{RawPackage}";
+            if (string.Equals(cleanCandidate, rawSelectionKey, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (string.Equals(RawPackage, GroupPackage, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(cleanCandidate, Group, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        // Also check if candidateKey itself uses @_group_ or @_group_.suffix for this entry's Group
+        DefaultsListParser.SplitPackage(cleanCandidate, out string candGroup, out string? candPkg);
+        candGroup = candGroup.TrimStart('/');
+        if (!string.IsNullOrEmpty(candPkg) && string.Equals(candGroup, Group, StringComparison.OrdinalIgnoreCase))
+        {
+            string? expandedCandPkg = ExpandGroupPackageKeyword(Group ?? "", candPkg, IsBareSingle);
+            if (string.Equals(expandedCandPkg, Package ?? (Group ?? "").Replace('/', '.'), StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>
     /// Gets a value indicating whether this entry is the <c>_self_</c> marker.
@@ -114,13 +169,14 @@ public sealed class DefaultsEntry
     {
         bool rooted = isRooted || group.Trim().StartsWith('/');
         string normalizedGroup = group.Trim().TrimStart('/');
-        string? normalizedPkg = ExpandGroupPackageKeyword(normalizedGroup, package);
+        string? normalizedPkg = ExpandGroupPackageKeyword(normalizedGroup, package, isBareSingle);
         return new()
         {
             Group = normalizedGroup,
             Path = path?.Trim().TrimStart('/'),
             IsOptional = isOptional,
             Package = normalizedPkg,
+            RawPackage = package?.Trim(),
             IsOverride = isOverride,
             IsMissing = isMissing,
             IsDisabled = isDisabled,
@@ -130,17 +186,24 @@ public sealed class DefaultsEntry
         };
     }
 
-    private static string? ExpandGroupPackageKeyword(string group, string? package)
+    /// <summary>
+    /// Expands <c>_group_</c> and <c>_group_.suffix</c> package placeholders against <paramref name="group"/>,
+    /// converting group path slashes (<c>'/'</c>) into dot-separated package segments (<c>'.'</c>) and treating
+    /// bare root config files (<paramref name="isBareSingle"/>) as having an empty group path.
+    /// </summary>
+    public static string? ExpandGroupPackageKeyword(string group, string? package, bool isBareSingle = false)
     {
         if (string.IsNullOrEmpty(package)) return null;
+        string effectiveGroup = isBareSingle ? "" : group.Replace('/', '.').Trim('.');
+
         if (string.Equals(package, GroupPackage, StringComparison.OrdinalIgnoreCase))
         {
-            return group;
+            return string.IsNullOrEmpty(effectiveGroup) ? GlobalPackage : effectiveGroup;
         }
         if (package.StartsWith(GroupPackage + ".", StringComparison.OrdinalIgnoreCase))
         {
             string suffix = package[(GroupPackage.Length + 1)..];
-            return string.IsNullOrEmpty(group) ? suffix : $"{group}.{suffix}";
+            return string.IsNullOrEmpty(effectiveGroup) ? suffix : $"{effectiveGroup}.{suffix}";
         }
         return package;
     }

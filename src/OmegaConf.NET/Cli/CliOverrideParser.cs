@@ -146,7 +146,9 @@ public static class CliOverrideParser
                 string pathToDelete = eqIdx > 0 ? trimmed[1..eqIdx].Trim() : trimmed[1..].Trim();
                 string? expectedRawValue = eqIdx > 0 ? trimmed[(eqIdx + 1)..].Trim() : null;
 
-                bool wasDroppedGroup = expectedRawValue == null && droppedGroups != null && droppedGroups.Contains(pathToDelete);
+                bool wasDroppedGroup = expectedRawValue == null &&
+                    droppedGroups != null &&
+                    (droppedGroups.Contains(pathToDelete) || pathToDelete.Contains('@'));
                 bool removed = RemoveDeepProperty(root, pathToDelete, expectedRawValue);
 
                 if (!removed && (!wasDroppedGroup || expectedRawValue != null))

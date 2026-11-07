@@ -271,10 +271,11 @@ public class TreeResolver
             // Check if this group/package combination already exists in defaults
             bool alreadyInDefaults = defaults.Any(d =>
                 !d.IsSelf &&
-                string.Equals(d.Group, group, StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(d.Package ?? "", pkg ?? "", StringComparison.OrdinalIgnoreCase));
+                (d.MatchesOverrideKey(key) ||
+                 (string.Equals(d.Group, group, StringComparison.OrdinalIgnoreCase) &&
+                  string.Equals(d.Package ?? "", pkg ?? "", StringComparison.OrdinalIgnoreCase))));
 
-            if (!alreadyInDefaults && ( pkg != null || IsKnownGroup(group)))
+            if (!alreadyInDefaults && (pkg != null || IsKnownGroup(group)))
             {
                 defaults.Add(DefaultsEntry.GroupChoice(group, val, isOptional: false, package: pkg));
             }
@@ -413,9 +414,8 @@ public class TreeResolver
     {
         if (string.IsNullOrEmpty(entry.Group)) return;
 
-        // Skip if the group (or group@package) was dropped via CLI (~group or ~group@package) or builder.DropGroup(...)
-        if (droppedGroups.Contains(entry.SelectionKey) ||
-            (string.IsNullOrEmpty(entry.Package) && droppedGroups.Contains(entry.Group)))
+        // Skip if the group (or group@package) was dropped via CLI (~group, ~group@package, or ~group@_group_) or builder.DropGroup(...)
+        if (droppedGroups.Any(d => !d.Contains('=') && entry.MatchesOverrideKey(d)))
         {
             return;
         }
@@ -428,8 +428,7 @@ public class TreeResolver
             {
                 string delKey = dropped[..eqIdx].Trim();
                 string delExpected = dropped[(eqIdx + 1)..].Trim().TrimStart('/');
-                if (string.Equals(delKey, entry.SelectionKey, StringComparison.OrdinalIgnoreCase) ||
-                    (string.IsNullOrEmpty(entry.Package) && string.Equals(delKey, entry.Group, StringComparison.OrdinalIgnoreCase)))
+                if (entry.MatchesOverrideKey(delKey))
                 {
                     if (string.Equals(delExpected, entry.Path, StringComparison.OrdinalIgnoreCase))
                     {
@@ -442,7 +441,7 @@ public class TreeResolver
             }
         }
 
-        // Check if the group's path was overridden via CLI (group@pkg=new/path or group=new/path) or builder.SelectPath(...)
+        // Check if the group's path was overridden via CLI (group@pkg=new/path, group@_group_=new/path, or group=new/path) or builder.SelectPath(...)
         string? subPath = null;
         bool wasOverridden = false;
         if (selectedPaths.TryGetValue(entry.SelectionKey, out var exactOverride))
@@ -455,9 +454,9 @@ public class TreeResolver
             subPath = plusOverride;
             wasOverridden = true;
         }
-        else if (string.IsNullOrEmpty(entry.Package) && selectedPaths.TryGetValue(entry.Group, out var groupOverride))
+        else if (selectedPaths.FirstOrDefault(kv => entry.MatchesOverrideKey(kv.Key)) is { Key: not null } matchedOverride)
         {
-            subPath = groupOverride;
+            subPath = matchedOverride.Value;
             wasOverridden = true;
         }
         else if (!entry.IsDisabled)
@@ -745,6 +744,18 @@ public class TreeResolver
                     effectiveGroup = group;
                     break;
                 }
+
+                if (isBareSingle && string.Equals(group, subPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    resolvedFile = FindConfigFile(sp, subPath);
+                    if (resolvedFile != null)
+                    {
+                        matchedGroupDir = sp;
+                        effectiveGroup = "";
+                        isSameGroupMerge = true;
+                        break;
+                    }
+                }
             }
         }
 
@@ -782,7 +793,10 @@ public class TreeResolver
 
         string? filePackageHeader = ExtractFilePackageHeader(resolvedFile);
         string fileName = Path.GetFileName(resolvedFile);
-        string relativeSubDir = Path.GetDirectoryName(subPath) ?? "";
+        string relativeSubDir = (Path.GetDirectoryName(subPath) ?? "").Replace('\\', '/').Trim('/');
+        string nestedEnclosingGroup = string.IsNullOrEmpty(relativeSubDir)
+            ? effectiveGroup
+            : (string.IsNullOrEmpty(effectiveGroup) ? relativeSubDir : $"{effectiveGroup}/{relativeSubDir}");
 
         ConfigObjectNode? accumulatedCascadeNode = null;
 
@@ -791,6 +805,7 @@ public class TreeResolver
             // Walk from matchedGroupDir down through each intermediate subdirectory (excluding the leaf file itself)
             string[] subSegments = relativeSubDir.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
             string currentCascadeDir = matchedGroupDir;
+            string currentCascadeGroup = effectiveGroup;
 
             for (int i = 0; i < subSegments.Length; i++)
             {
@@ -798,17 +813,18 @@ public class TreeResolver
                 if (File.Exists(parentFileCandidate) &&
                     !string.Equals(Path.GetFullPath(parentFileCandidate), Path.GetFullPath(resolvedFile), StringComparison.OrdinalIgnoreCase))
                 {
-                    var layerNode = LoadFileWithHierarchy(rootDir, parentFileCandidate, selectedPaths, droppedGroups, enclosingGroup: effectiveGroup);
+                    var layerNode = LoadFileWithHierarchy(rootDir, parentFileCandidate, selectedPaths, droppedGroups, enclosingGroup: currentCascadeGroup);
                     accumulatedCascadeNode = accumulatedCascadeNode != null
                         ? (ConfigObjectNode)OperatorEngine.Apply(accumulatedCascadeNode, layerNode)
                         : layerNode;
                 }
 
                 currentCascadeDir = Path.Combine(currentCascadeDir, subSegments[i]);
+                currentCascadeGroup = string.IsNullOrEmpty(currentCascadeGroup) ? subSegments[i] : $"{currentCascadeGroup}/{subSegments[i]}";
             }
         }
 
-        var currentNode = LoadFileWithHierarchy(rootDir, resolvedFile, selectedPaths, droppedGroups, enclosingGroup: effectiveGroup);
+        var currentNode = LoadFileWithHierarchy(rootDir, resolvedFile, selectedPaths, droppedGroups, enclosingGroup: nestedEnclosingGroup);
 
         if (accumulatedCascadeNode != null)
         {

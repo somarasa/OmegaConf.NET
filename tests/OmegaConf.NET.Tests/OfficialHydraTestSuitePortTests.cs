@@ -648,4 +648,127 @@ public class OfficialHydraTestSuitePortTests : IDisposable
                 .AddCliArgs("flag_str=bool(not_a_boolean)")
                 .BuildNode());
     }
+
+    // =========================================================================
+    // 8. Ported from Hydra tests/defaults_list/test_group_package.py, test_slash_normalization.py & tests/instantiate/test_positional.py
+    // =========================================================================
+
+    [Fact]
+    public void GroupPackage_CliDeleteAndOverrideWithSymbolicGroupKeyword_AndRootBareSingleGroupSuffix_MatchHydra()
+    {
+        string prepDir = Path.Combine(_tempDir, "preprocess");
+        string deepDir = Path.Combine(_tempDir, "cloud", "aws");
+        Directory.CreateDirectory(prepDir);
+        Directory.CreateDirectory(deepDir);
+
+        File.WriteAllText(Path.Combine(prepDir, "v1.yaml"), "step: normalize");
+        File.WriteAllText(Path.Combine(prepDir, "v2.yaml"), "step: tokenize");
+        File.WriteAllText(Path.Combine(deepDir, "rds.yaml"), "engine: aurora");
+        File.WriteAllText(Path.Combine(_tempDir, "item.yaml"), "x: 42");
+
+        File.WriteAllText(Path.Combine(_tempDir, "config.yaml"), """
+            defaults:
+              - /preprocess@_group_: v1
+              - /cloud/aws@_group_.primary: rds
+              - /item@_group_.suffix
+              - _self_
+            """);
+
+        // 1. Default composition:
+        //    - /preprocess@_group_: v1 -> mounts under preprocess
+        //    - /cloud/aws@_group_.primary: rds -> expands 'cloud/aws' to 'cloud.aws.primary' (not literal key 'cloud/aws')
+        //    - /item@_group_.suffix -> bare root config has empty group, so mounts under 'suffix'
+        var baseNode = OmegaConfBuilder.Create()
+            .SetRootDirectory(_tempDir)
+            .BuildNode();
+
+        Assert.Equal("normalize", baseNode.Select<string>("preprocess.step"));
+        Assert.Equal("aurora", baseNode.Select<string>("cloud.aws.primary.engine"));
+        Assert.Equal(42, baseNode.Select<int>("suffix.x"));
+
+        // 2. CLI override using symbolic @_group_ (preprocess@_group_=v2 or plain preprocess=v2)
+        var overriddenBySymbolic = OmegaConfBuilder.Create()
+            .SetRootDirectory(_tempDir)
+            .AddCliArgs("preprocess@_group_=v2")
+            .BuildNode();
+        Assert.Equal("tokenize", overriddenBySymbolic.Select<string>("preprocess.step"));
+
+        var overriddenByGroup = OmegaConfBuilder.Create()
+            .SetRootDirectory(_tempDir)
+            .AddCliArgs("preprocess=v2")
+            .BuildNode();
+        Assert.Equal("tokenize", overriddenByGroup.Select<string>("preprocess.step"));
+
+        // 3. CLI deletion using symbolic ~preprocess@_group_ (with StructMode enabled)
+        var deletedBySymbolic = OmegaConfBuilder.Create()
+            .SetRootDirectory(_tempDir)
+            .WithStructMode()
+            .AddCliArgs("~preprocess@_group_")
+            .BuildNode();
+        Assert.Null(deletedBySymbolic.GetChild("preprocess"));
+    }
+
+    [Fact]
+    public void SlashNormalization_SubgroupChoiceWithRelativeDefaults_ResolvesInsideSubgroupDirectory()
+    {
+        // Modeled on Hydra tests/defaults_list/test_slash_normalization.py:
+        // config.yaml selects "- group_a: sub_group/item"
+        // and group_a/sub_group/item.yaml has a relative default "- sub_sub: leaf" (located at group_a/sub_group/sub_sub/leaf.yaml)
+        string subGroupDir = Path.Combine(_tempDir, "group_a", "sub_group");
+        string subSubDir = Path.Combine(subGroupDir, "sub_sub");
+        Directory.CreateDirectory(subSubDir);
+
+        File.WriteAllText(Path.Combine(subSubDir, "leaf.yaml"), "leaf_val: 99");
+        File.WriteAllText(Path.Combine(subGroupDir, "item.yaml"), """
+            defaults:
+              - sub_sub: leaf
+              - _self_
+            item_val: 10
+            """);
+        File.WriteAllText(Path.Combine(_tempDir, "config.yaml"), """
+            defaults:
+              - group_a: sub_group/item
+              - _self_
+            """);
+
+        var node = OmegaConfBuilder.Create()
+            .SetRootDirectory(_tempDir)
+            .BuildNode();
+
+        Assert.Equal(10, node.Select<int>("group_a.item_val"));
+        Assert.Equal(99, node.Select<int>("group_a.sub_sub.leaf_val"));
+    }
+
+    [Fact]
+    public void Instantiate_PositionalArgsOverrideAndRelativeListElementInterpolation_MatchHydra()
+    {
+        // 1. Modeled on Hydra tests/instantiate/test_positional.py (direct_args+interpolation & positional override precedence)
+        string optType = typeof(OptimizerStub).AssemblyQualifiedName!;
+        var cfg = OmegaConfig.ParseYaml($$"""
+            _target_: "{{optType}}"
+            _args_:
+              - SGD
+              - 0.01
+            name: ConfigKeywordName
+            lr: "${._args_.1}"
+            """);
+
+        // Call-site _args_ override updates _args_[0] and _args_[1], and ${._args_.1} resolves against the overridden _args_!
+        // Also verifies that positional _args_ takes precedence over conflicting config property 'name: ConfigKeywordName'.
+        var inst = OmegaConfig.Instantiate<OptimizerStub>(cfg, new { _args_ = new object[] { "AdamW", 0.05 } });
+        Assert.Equal("AdamW", inst.Name);
+        Assert.Equal(0.05, inst.Lr);
+
+        // 2. Relative dot navigation (${.0}, ${..sibling_tag}, and ${...parent_prefix}) from directly inside a list element (items[0])
+        var listInterpCfg = OmegaConfig.ParseYaml("""
+            parent_prefix: global_v1
+            container:
+              sibling_tag: local_tag
+              items:
+                - first_elem
+                - "${.0}:${..sibling_tag}:${...parent_prefix}"
+            """);
+        var merged = OmegaConfig.Merge(listInterpCfg);
+        Assert.Equal("first_elem:local_tag:global_v1", merged.Select<string>("container.items[1]"));
+    }
 }

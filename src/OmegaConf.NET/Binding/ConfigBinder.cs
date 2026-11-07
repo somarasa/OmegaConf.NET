@@ -69,32 +69,53 @@ public static class ConfigBinder
         ActiveWhitelist.Value = whitelist ?? previous;
         try
         {
-            if (overrides == null || overrides.Count == 0 || node is not ConfigObjectNode objNode)
+            if (node is not ConfigObjectNode objNode)
             {
                 return Bind<T>(node);
             }
 
             var merged = (ConfigObjectNode)objNode.Clone();
-            foreach (var (k, v) in overrides)
+            if (overrides != null && overrides.Count > 0)
             {
-                var overrideNode = ConvertOverrideToNode(v);
-                if (overrideNode is ConfigObjectNode overrideObj &&
-                    merged.TryGetChild(k, out var existingChild) &&
-                    existingChild is ConfigObjectNode existingObj)
+                foreach (var (k, v) in overrides)
                 {
-                    merged.SetChild(k, Operators.OperatorEngine.Apply(existingObj, overrideObj), allowNewKeyInStruct: true);
-                }
-                else
-                {
-                    merged.SetChild(k, overrideNode, allowNewKeyInStruct: true);
+                    var overrideNode = ConvertOverrideToNode(v);
+                    if (overrideNode is ConfigObjectNode overrideObj &&
+                        merged.TryGetChild(k, out var existingChild) &&
+                        existingChild is ConfigObjectNode existingObj)
+                    {
+                        merged.SetChild(k, Operators.OperatorEngine.Apply(existingObj, overrideObj), allowNewKeyInStruct: true);
+                    }
+                    else
+                    {
+                        merged.SetChild(k, overrideNode, allowNewKeyInStruct: true);
+                    }
                 }
             }
+
+            if (ContainsUnresolvedInterpolation(merged))
+            {
+                var interpolationEngine = new Interpolation.InterpolationEngine(merged);
+                interpolationEngine.ResolveAll();
+            }
+
             return Bind<T>(merged);
         }
         finally
         {
             ActiveWhitelist.Value = previous;
         }
+    }
+
+    private static bool ContainsUnresolvedInterpolation(ConfigNode node)
+    {
+        return node switch
+        {
+            ConfigValueNode vn => vn.Value is string s && (s.Contains("${", StringComparison.Ordinal) || s.Contains(@"\${", StringComparison.Ordinal)),
+            ConfigListNode list => list.Items.Any(ContainsUnresolvedInterpolation),
+            ConfigObjectNode obj => obj.Children.Values.Any(ContainsUnresolvedInterpolation),
+            _ => false
+        };
     }
 
     /// <summary>
@@ -618,11 +639,7 @@ public static class ConfigBinder
             if (positionalArgsList != null && i < positionalArgsList.Items.Count)
             {
                 args[i] = Bind(positionalArgsList.Items[i], param.ParameterType, $"{currentPath}._args_[{i}]");
-                // Only mark as bound if not explicitly overridden by a named property in objNode
-                if (FindMatchingChild(objNode, paramName) == null)
-                {
-                    boundParameterNames.Add(paramName);
-                }
+                boundParameterNames.Add(paramName);
                 continue;
             }
 
