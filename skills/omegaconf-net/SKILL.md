@@ -9,6 +9,7 @@ Use this skill when you need to create, modify, or integrate configuration trees
 
 OmegaConf.NET brings the best features of Python's **Hydra** and **OmegaConf** to the .NET ecosystem:
 - Directory-based **Config Groups** and **Defaults Lists**.
+- **Multi-Config Selection**: selecting several configs from one group **merges** them into a keyed object at the group package — namespace each with `@package group.<name>` to keep them distinct.
 - **Multi-level Automatic Cascading** and cross-format explicit inheritance (`_inherits_`).
 - In-config **mutation operators** (`+=`, `-=`, `*=`, `/=`, `&=`, `|=`, `!=`).
 - **Variable interpolation** with list indexing (`${servers[0]}`), relative dot navigation, literal escaping, `${eval:...}`, and `${env:...}`.
@@ -57,6 +58,31 @@ active_workers: 4
 ### The `_self_` Keyword
 - If `_self_` is placed at the **end** (or omitted), settings in `config.yaml` **override** the defaults.
 - If `_self_` is placed at the **beginning**, the defaults **override** `config.yaml`.
+- `_self_` can appear at most **once** in any defaults list (duplicates throw `ConfigSyntaxException`).
+
+### Defaults List Directives & Syntax Rules
+- **No Parent Directory Traversal (`..`)**: Defaults lists strictly forbid `..` (`- ../base` or `- db: ../sqlite` is rejected). Paths must be relative to the group directory or absolute from the configuration root starting with `/` (e.g. `- /shared/base` or `- /cloud/aws@_group_.primary: rds`). To inherit from parent files outside the tree, use `_inherits_: "../base.yaml"` or an absolute rooted path `- /path`.
+- **Overriding in Child Configs (`override`)**: If a child configuration changes a default choice selected by a parent base, prefix it with `override`:
+  ```yaml
+  defaults:
+    - override db: mysql
+  ```
+  Specifying conflicting choices for the same group without `override` throws `ConfigSyntaxException`.
+- **Disabling a Group (`null`)**: Set `- group: null` (or CLI `group=null`) to skip loading any configuration from that group.
+- **Mandatory Defaults (`???`)**: Mark a group as `- group: ???` when a choice must be supplied by the caller via CLI (`group=choice`). If left unresolved at runtime, throws `MissingValueMarkerException`.
+- **Optional Defaults (`optional`)**: Prefix with `optional` (`- optional secrets: local`) to gracefully ignore missing configuration files without error.
+- **Slash Normalization in Subgroups**: If a choice selects a subgroup like `- group_a: sub_group/item`, any relative defaults declared inside `item.yaml` resolve inside `group_a/sub_group/`.
+
+### Package Directive Precedence
+When determining where a configuration file mounts in the output object tree, OmegaConf.NET follows Hydra's strict precedence order:
+1. **Defaults List Package Directive**: `- group@custom_pkg: choice` (or CLI `+group@pkg=choice`) has highest precedence.
+2. **File Header Directive**: `# @package custom_pkg` in the target file.
+   > **Note**: Never put inline comments on the `# @package` line (e.g. `# @package foo # comment` will corrupt the package name). Keep comments on separate lines.
+3. **Config Group Name**: Default fallback derived from the group folder name (e.g. `db/` mounts under `db`).
+
+Special package keywords:
+- `@_global_`: Mounts keys directly at the root object level.
+- `@_group_`: Refers to the config group name (e.g. `- /cloud/aws@_group_.primary: rds` mounts at `cloud.aws.primary`).
 
 ### Automatic Cascading vs. Explicit Inheritance
 - **Auto-Cascading (Default)**: If a child file like `db/staging/postgres.yaml` shares the same filename as its parent `db/postgres.yaml`, the base file is loaded automatically first. Only write diffs in the child file!
@@ -66,6 +92,74 @@ active_workers: 4
   # Or multiple bases:
   _inherits_: ["base1.yaml", "base2.yaml"]
   ```
+
+### Selecting Multiple Configs from a Group (Multi-Config)
+
+You can select **several** configs from one group at once by passing a list in the Defaults List (or on the command line):
+
+```yaml
+defaults:
+  - services: [postgres, temporal]   # two files from the services/ group
+```
+
+**Composition MERGES — it does not build a list.** OmegaConf.NET mounts every selected file under the group's package and **merges** them into a single object. It never concatenates them into an array (this matches upstream Hydra):
+
+```yaml
+# services/postgres.yaml   -> mounted at: services
+name: postgres
+type: _postgres._tcp
+port: 5432
+# services/temporal.yaml   -> also mounted at: services
+name: temporal
+type: _temporal._tcp
+port: 7233
+# =>
+services:
+  name: temporal       # temporal clobbered postgres (same key)
+  type: _temporal._tcp
+  port: 7233
+```
+
+**Keep each file distinct by giving it its own namespace** with a `# @package group.<name>` header — the documented Hydra pattern ("use an explicit nesting level to prevent them stepping over one another"). Each file then mounts under its own key, so nothing is clobbered:
+
+```yaml
+# services/postgres.yaml
+# @package services.postgres
+name: postgres
+type: _postgres._tcp
+port: 5432
+# services/temporal.yaml
+# @package services.temporal
+name: temporal
+type: _temporal._tcp
+port: 7233
+# =>
+services:
+  postgres:
+    name: postgres
+    type: _postgres._tcp
+    port: 5432
+  temporal:
+    name: temporal
+    type: _temporal._tcp
+    port: 7233
+```
+
+Bind the resulting keyed object to a dictionary, then index by name:
+
+```csharp
+public record AppConfig(
+    [property: ConfigRequired] string AppName,
+    IReadOnlyDictionary<string, ServiceDiscoveryConfig>? Services = null);
+```
+
+```csharp
+var postgres = cfg.Services!["postgres"];   // port 5432
+```
+
+> Notes:
+> - A true C# `List<T>` / `T[]` comes from a **structured-config field** typed as a list; multi-config composition itself never yields an array.
+> - A config file's **root must be a mapping/object** — OmegaConf.NET rejects a bare list as the root of a config file.
 
 ---
 
@@ -122,6 +216,19 @@ strict_mode&=: false          # Logical AND
     staging:
       port: 5433
       connection: "Server=${..host};Port=${.port}"
+  ```
+- **Inside List Elements (`.` / `..` / `...`)**:
+  Within list elements (e.g. `container.items[1]`):
+  - **`${.0}`**: References sibling index `0` of the *current list*.
+  - **`${..sibling_key}`**: Escapes the list to reference a field in the enclosing container (`container.sibling_key`).
+  - **`${...root_key}`**: Escapes the enclosing container up to the grandparent/root level.
+  ```yaml
+  parent_prefix: global_v1
+  container:
+    sibling_tag: local_tag
+    items:
+      - first_elem
+      - "${.0}:${..sibling_tag}:${...parent_prefix}"  # -> "first_elem:local_tag:global_v1"
   ```
 
 ### Literal Escaping
@@ -222,6 +329,20 @@ AppConfig config = OmegaConfBuilder.Create<AppConfig>()
 
 ### CLI Overrides, Struct Mode & Multi-Run Sweep Generators
 CLI arguments passed to `.AddCliArgs(args)` can override paths, redirect `@package`, drop groups/keys (`~`), enforce Struct Mode (`+` / `++`), or run parameter sweeps (`-m`):
+
+| Prefix / Pattern | Example | Purpose / Behavior |
+| :--- | :--- | :--- |
+| `key=val` | `server.port=8080` | Normal override (throws in Struct Mode if key is not defined). |
+| `+key=val` | `+server.ssl=true` | Strict add — throws if `server.ssl` already exists. |
+| `++key=val` | `++server.ssl=true` | Upsert — safely adds if missing or updates if already present. |
+| `~key` | `~server.ssl` | Deletes the key from configuration. |
+| `~key=expected` | `~legacy_flag=true` | Conditional delete — only removes if current value is `true` (throws on mismatch). |
+| `~group` / `~group=choice` | `~db` or `~db=postgres` | Drops default group selection entirely (conditionally checks choice). |
+| `tags=[a,b]` | `tags=[gpu,bench]` | Passes an explicit literal list of strings. |
+| `param=v1,v2` (with `-m`) | `-m lr=0.01,0.1` | Triggers a Cartesian product sweep across 2 separate runs. |
+
+> **Gotcha**: `++group=choice` is invalid for config groups and throws `ConfigSyntaxException`. `++` is strictly for keys/properties; config groups are selected with `group=choice` or `+group=choice`.
+
 ```bash
 # Select path or @package target
 dotnet run -- db=production/postgres +experiment@_global_=fast
@@ -316,3 +437,25 @@ Add to `config.yaml`:
    - Writing `timeout: "${base_timeout}"` preserves the integer type `30`. Do not wrap with extra quotes or text unless string concatenation is intended.
 4. ❌ **Do NOT forget `_self_` when local file overrides are needed**:
    - If `config.yaml` defines a parameter that should take precedence over `defaults:`, always place `_self_` at the end of the `defaults:` list.
+
+5. ❌ **Do NOT assume `group: [a, b]` produces a list** — multi-config **merges** the selected files into a single object at the group package (matching upstream Hydra); it never builds an array. To keep each file distinct, namespace them with a `# @package group.<name>` header so each mounts under its own key, and bind the result to an `IReadOnlyDictionary<string, T>` indexed by name.
+6. ❌ **Do NOT use `..` parent traversal in `defaults:` lists**:
+   - Wrong: `defaults: [ - ../base, - db: ../sqlite ]`
+   - Right: Use absolute rooted paths prefixed with `/` (`- /shared/base`) or explicit `_inherits_: "../base.yaml"`. Hydra and OmegaConf.NET reject `..` in defaults lists.
+7. ❌ **Do NOT redefine a default group choice in a child file without `override`**:
+   - Wrong: `defaults: [ - db: mysql ]` in a child configuration when a parent base already specified a choice for `db`.
+   - Right: `defaults: [ - override db: mysql ]`. Conflicting choices without `override` throw `ConfigSyntaxException`.
+8. ❌ **Do NOT put `_self_` more than once in a defaults list**:
+   - Duplicate `_self_` entries are invalid and throw `ConfigSyntaxException`.
+9. ❌ **Do NOT confuse sweep commas with list literals in CLI overrides**:
+   - In `-m` multi-run, `tags=gpu,cluster` runs 2 separate sweep runs (`tags=gpu` and `tags=cluster`).
+   - To set an explicit list literal of multiple items in a single run or sweep, enclose it in brackets: `tags=[gpu,cluster]`.
+10. ❌ **Do NOT use `++` on config groups in CLI**:
+    - `++` is strictly for config keys/properties (e.g. `++server.timeout=30`).
+    - Using `++db=mysql` throws `ConfigSyntaxException`. Use `db=mysql` or `+db=mysql` to select a group.
+11. ❌ **Do NOT leave unescaped `???` when literal text is intended**:
+    - `???` is the mandatory missing marker that halts execution with `MissingValueMarkerException` if not overridden before binding.
+    - If you need the literal string `"???"`, escape it as `\???`.
+12. ❌ **Do NOT put inline comments on the same line as `# @package`**:
+    - Wrong: `# @package _global_ # load at root`
+    - Right: Keep comments on separate lines above or below `# @package _global_` so the package name is parsed cleanly.
