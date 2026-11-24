@@ -1,40 +1,38 @@
-# OmegaConf.NET 🚀
+# OmegaConf.NET
 
 [![CI](https://github.com/somarasa/OmegaConf.NET/actions/workflows/ci.yml/badge.svg)](https://github.com/somarasa/OmegaConf.NET/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%209.0%20%7C%2010.0-purple.svg)](https://dotnet.microsoft.com/)
 
-**OmegaConf.NET** is a powerful, hierarchical, and composable configuration framework for C# and .NET, inspired by Python's [Hydra](https://hydra.cc/) and [OmegaConf](https://omegaconf.readthedocs.io/).
+OmegaConf.NET is a hierarchical, composable configuration framework for C# and .NET inspired by Python's [Hydra](https://hydra.cc/) and [OmegaConf](https://omegaconf.readthedocs.io/).
 
-It bridges the gap in the .NET configuration ecosystem by bringing **tree-based config composition**, **automatic inheritance cascading**, **mutation operators** (`+=`, `-=`, `*=`, `/=`, `&=`, `|=`, `!=`), **strict structured typing**, **variable interpolation**, and seamless **`Microsoft.Extensions.Configuration`** integration.
-
----
-
-## ✨ Features
-
-- 🌳 **Hierarchical Tree Composition**: Organize configs into reusable Config Groups (e.g. `db/`, `model/`, `env/`) and compose them using Hydra-style `defaults` lists.
-- ⚡ **Auto-Cascading & Explicit Inheritance**: Sub-configs (e.g. `db/staging/postgres.yaml`) automatically inherit from base files (`db/postgres.yaml`), keeping configurations DRY. Also supports explicit `_inherits_: "../base.yaml"`.
-- 🧮 **In-Config Mutation Operators**:
-  - Direct assignment: `=`
-  - Arithmetic & append: `+=`, `-=`, `*=`, `/=`
-  - Boolean logic & toggle: `&=`, `|=`, `!=`
-- 🧩 **Format Agnostic**: Built-in support for **YAML**, **TOML**, and **JSON / JSONC** (JSON with comments and trailing commas), including cross-format composition and `.ToYaml()`, `.ToJson()`, and `.ToToml()` serialization.
-- 🔗 **Rich Variable Interpolation**:
-  - `${path.to.key}` with **native type preservation** (numbers remain numbers, booleans remain booleans).
-  - List indexing support: `${servers[0]}` or `${servers.0}`.
-  - Relative & sibling dot navigation: `${.sibling}` and `${..parent}`.
-  - Default fallback syntax: `${path.to.key:default_value}`.
-  - Built-in math & logic evaluator (`${eval: 10 + 5 * 2}`) and environment variable resolver (`${env:VAR_NAME, fallback}`).
-  - Extensible custom resolvers in C# (`${slugify:${app_name}}`).
-  - Circular dependency detection and cycle prevention.
-- ❓ **Mandatory Value Marker (`???`)**: Mark keys that must be supplied by lower layers or CLI overrides.
-- 💻 **CLI Overrides**: Seamlessly switch paths (`db=staging/postgres` or `db=postgres`), drop branches (`~db`), or mutate values (`threads+=2`, `tags+=[gpu]`, `debug!=true`) from `args[]`.
-- 🛡️ **Structured Configs & Strict Typing**: Bind to POCOs and positional `record` types with automatic `PascalCase` ↔ `snake_case` mapping (including acronym handling like `SSLPort` ↔ `ssl_port`), rich scalar types (`TimeSpan`, `DateTimeOffset`, `DateOnly`, `TimeOnly`, `Guid`, `Uri`), `[ConfigRequired]`, `[ConfigKey]`, and `[ConfigIgnore]` attributes.
-- 🔌 **Standard .NET Integration**: Native `IConfigurationSource` and `ConfigurationProvider` for ASP.NET Core and `Microsoft.Extensions.DependencyInjection`.
+It provides tree-based configuration composition, automatic inheritance cascading, in-config mutation operators (`+=`, `-=`, `*=`, `/=`, `&=`, `|=`, `!=`), strict structured typing, variable interpolation, parameter sweeps, and native `Microsoft.Extensions.Configuration` integration.
 
 ---
 
-## 📦 Installation
+## Features
+
+- **Hierarchical Composition**: Organize configurations into modular Config Groups (e.g., `db/`, `model/`, `env/`) and compose them via `defaults` lists.
+- **Auto-Cascading & Explicit Inheritance**: Nested configurations automatically cascade on base files sharing the same name (`db/staging/postgres.yaml` inherits from `db/postgres.yaml`). Also supports explicit `_inherits_: "../base.yaml"`.
+- **In-Config Mutation Operators**: Key suffixes modify inherited values (`+=`, `-=`, `*=`, `/=`, `&=`, `|=`, `!=`).
+- **Format Agnostic**: Unified AST parsing and serialization across YAML, JSON / JSONC, and TOML.
+- **Variable Interpolation**:
+  - `${path.to.key}` with native type preservation (numbers remain numbers, booleans remain booleans).
+  - List indexing: `${servers[0]}` or `${servers.0}`.
+  - Sibling and parent navigation: `${.sibling}` and `${..parent}`.
+  - Built-in math and logic evaluation via `${eval:...}`.
+  - Environment variables: `${env:VAR, fallback}` and `${oc.env:VAR, fallback}`.
+  - Extensible custom C# resolvers.
+  - Cycle detection and circular dependency prevention.
+- **Mandatory Value Markers (`???`)**: Mark keys that must be supplied by child layers or command-line arguments.
+- **Command-Line Overrides**: Override group selections (`db=production/postgres`), drop groups (`~db`), mutate values (`threads+=2`, `debug!=true`), or enforce strict mode (`+key=val`, `++key=val`).
+- **Parameter Sweeps (Multi-Run)**: Run Cartesian product sweeps across comma-separated values or generator functions (`range()`, `linspace()`, `choice()`, `glob()`).
+- **Structured Configs**: Bind AST nodes to C# POCOs and positional `record` primary constructors with automatic casing translation (`PascalCase` to `snake_case`, `kebab-case`, or exact match).
+- **.NET Integration**: First-class `IConfigurationSource` and `ConfigurationProvider` for ASP.NET Core and Microsoft DI.
+
+---
+
+## Installation
 
 ```bash
 dotnet add package OmegaConf.NET
@@ -43,20 +41,20 @@ dotnet add package OmegaConf.NET.Extensions
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
-### 1. Organize Your Configurations
+### 1. Configuration Files Layout
 
 ```text
 configs/
 ├── config.yaml               # Root entrypoint
 └── db/
-    ├── postgres.yaml         # Base PostgreSQL defaults
+    ├── postgres.yaml         # Base defaults
     ├── sqlite.yaml
     ├── staging/
-    │   └── postgres.yaml     # Staging overrides
+    │   └── postgres.yaml     # Staging overrides (cascades on db/postgres.yaml)
     └── production/
-        └── postgres.yaml     # Production overrides (uses operators)
+        └── postgres.yaml     # Production overrides with operators
 ```
 
 #### `configs/config.yaml`
@@ -73,38 +71,37 @@ active_workers: 4
 ```yaml
 driver: postgres
 port: 5432
-user: "db_admin"
 max_connections: 50
 ssl: false
 timeout_seconds: 30
 ```
 
-#### `configs/db/staging/postgres.yaml` (Automatically cascades on `db/postgres.yaml`!)
+#### `configs/db/staging/postgres.yaml` (Overrides)
 ```yaml
 host: "staging-db.internal"
 max_connections: 20
 ```
 
-#### `configs/db/production/postgres.yaml`
+#### `configs/db/production/postgres.yaml` (Overrides with Operators)
 ```yaml
 host: "prod-db.internal"
-max_connections*=: 4          # 50 * 4 = 200 connections
+max_connections*=: 4          # 50 * 4 = 200
 ssl: true
-timeout_seconds+=: 30         # 30 + 30 = 60s timeout
+timeout_seconds+=: 30         # 30 + 30 = 60
 ```
 
 ---
 
-### 2. Define Strongly Typed C# Classes
+### 2. Define Strongly Typed C# Models
 
 ```csharp
 using OmegaConf.NET.Attributes;
 
 public class DatabaseConfig
 {
-    public string Driver { get; set; } = "";
-    public string Host { get; set; } = "";
-    public int Port { get; set; }
+    public string Driver { get; set; } = "postgres";
+    public string Host { get; set; } = "localhost";
+    public int Port { get; set; } = 5432;
     public int MaxConnections { get; set; }
     public bool Ssl { get; set; }
     public int TimeoutSeconds { get; set; }
@@ -117,10 +114,10 @@ public class AppConfig
 
     public DatabaseConfig? Db { get; set; }
 
-    public int ActiveWorkers { get; set; }
+    public int ActiveWorkers { get; set; } = 4;
 }
 
-// Positional C# records are also supported out of the box:
+// Positional records are also supported:
 public record ServiceRecordConfig(
     [property: ConfigRequired] string AppName,
     DatabaseConfig? Db,
@@ -129,125 +126,75 @@ public record ServiceRecordConfig(
 
 ---
 
-### 3. Load & Compose
+### 3. Load & Bind
 
 ```csharp
 using OmegaConf.NET;
 
-// Build strongly typed configuration
 AppConfig config = OmegaConfBuilder.Create<AppConfig>()
     .SetRoot("configs")
-    .AddCliArgs(args) // Supports: db=production/postgres active_workers+=2
+    .AddCliArgs(args) // CLI overrides, e.g. db=production/postgres active_workers+=2
     .Build();
 
-Console.WriteLine($"Service: {config.AppName}");
-Console.WriteLine($"DB Host: {config.Db?.Host}, Max Connections: {config.Db?.MaxConnections}");
+Console.WriteLine($"App: {config.AppName}");
+Console.WriteLine($"Database: {config.Db?.Host}:{config.Db?.Port} (Connections: {config.Db?.MaxConnections})");
 ```
 
 ---
 
-## 🧮 Operators Reference
+## Operators Reference
 
-OmegaConf.NET supports operators as key suffixes in YAML, JSON, and TOML, as well as in CLI arguments:
+Operators are declared as key suffixes in configuration files or passed via CLI overrides:
 
-| Operator | Action | Applicable Data Types | Example |
+| Operator | Action | Target Types | Example |
 | :---: | :--- | :--- | :--- |
-| `=` | Assignment / Replace | Any | `port=: 5432` |
-| `+=` | Addition / Concat / Append | Numbers, Strings, Lists, Objects | `timeout+=: 10`, `tags+=: ["gpu"]` |
-| `-=` | Subtraction / Item Removal | Numbers, Lists | `retry_count-=: 1`, `items-=: ["old"]` |
-| `*=` | Multiplication / Repeat | Numbers, Strings | `workers*=: 2`, `"ha"*=: 3` |
+| `=` | Assignment / replace | Any | `port=: 5432` |
+| `+=` | Add / concatenate / append | Numbers, Strings, Lists, Objects | `timeout+=: 10`, `tags+=: ["gpu"]` |
+| `-=` | Subtraction / item removal | Numbers, Lists | `retry_count-=: 1`, `items-=: ["old"]` |
+| `*=` | Multiplication / repeat | Numbers, Strings | `workers*=: 2`, `"ha"*=: 3` |
 | `/=` | Division | Numbers | `rate/=: 2` |
-| `&=` | Logical / Bitwise AND | Booleans, Integers | `strict_mode&=: false` |
-| `|=` | Logical / Bitwise OR | Booleans, Integers | `enable_feature|=: true` |
-| `!=` | Logical Toggle / Invert | Booleans | `debug!=: true` *(flips current bool)* |
+| `&=` | Logical / bitwise AND | Booleans, Integers | `strict_mode&=: false` |
+| `|=` | Logical / bitwise OR | Booleans, Integers | `enable_feature|=: true` |
+| `!=` | Boolean toggle / invert | Booleans | `debug!=: true` |
 
 ---
 
-## 💻 CLI Overrides & Multi-Run Sweeps
+## Command-Line Overrides & Sweeps
 
-### Dynamic CLI Overrides
-OmegaConf.NET translates command-line arguments dynamically:
-
+### CLI Overrides
 ```bash
-# 1. Switch config group paths
+# Switch config group choice
 dotnet run -- db=production/postgres
 
-# 2. Exclude a config group completely (Hydra tilde syntax)
+# Drop a config group
 dotnet run -- ~db
 
-# 3. Override deep properties with operators
+# Override properties with mutation operators
 dotnet run -- db.max_connections=500 db.timeout_seconds+=15 active_workers+=4 debug!=true
+
+# Struct mode (safe add / upsert)
+dotnet run -- +db.pool_size=20 ++db.port=5433
 ```
 
-### Multi-Run / Parameter Sweeps (Hydra's `-m`)
-Run grid searches or parameter combinations across multiple choices:
+### Parameter Sweeps (`-m` / `--multirun`)
+Generate and run combinations across parameters:
 ```bash
 dotnet run -- -m db=staging/postgres,production/postgres active_workers=2,4,8
 ```
-Programmatically in C#:
+
+Programmatic execution:
 ```csharp
 IReadOnlyList<AppConfig> configs = OmegaConfBuilder.Create<AppConfig>()
     .SetRoot("configs")
     .AddCliArgs(args)
     .BuildSweeps();
-
-foreach (var cfg in configs)
-{
-    Console.WriteLine($"Running with DB={cfg.Db?.Host}, Workers={cfg.ActiveWorkers}");
-}
 ```
 
 ---
 
-## 🔍 Config Diffing & Inspection
+## Variable Interpolation & Resolvers
 
-Compare two configuration states and get a clear, hierarchical change report:
-```csharp
-using OmegaConf.NET.Diff;
-
-ConfigDiff diff = ConfigDiffer.Compare(stagingConfig, productionConfig);
-Console.WriteLine(diff.ToString());
-```
-Output:
-```text
-~ db.host: "staging-db.internal" -> "prod-db.internal"
-~ db.max_connections: 20 -> 200
-~ db.ssl: False -> True
-~ db.timeout_seconds: 30 -> 60
-```
-
-### Serialization (`ToYaml`, `ToJson`, `ToToml`)
-Export any resolved `ConfigNode` back to YAML, JSON, or TOML:
-```csharp
-using OmegaConf.NET.Serialization;
-
-string yaml = stagingNode.ToYaml();
-string json = stagingNode.ToJson(indented: true);
-string toml = stagingNode.ToToml();
-```
-
----
-
-## 📝 JSON Schema Generation (IDE Auto-Complete)
-
-Generate a standard Draft-07 JSON Schema for your C# configuration class:
-```csharp
-using OmegaConf.NET.Schema;
-
-JsonSchemaGenerator.GenerateSchemaFile<AppConfig>("configs/config.schema.json");
-```
-Add this comment to the top of your `config.yaml` to enable **instant auto-complete and validation** in VS Code, Rider, and Visual Studio:
-```yaml
-# yaml-language-server: $schema=./config.schema.json
-app_name: MyService
-active_workers: 4
-```
-
----
-
-## 🔗 Interpolation & Resolvers
-
-### Path Interpolation & Type Preservation
+### Interpolation Syntax
 ```yaml
 server:
   host: "10.0.0.1"
@@ -256,163 +203,96 @@ server:
 # String interpolation
 api_url: "http://${server.host}:${server.port}/api"
 
-# Native type preservation (target_port resolves to int 8080, not string "8080")
+# Native type preservation (resolves to int 8080, not string)
 target_port: "${server.port}"
 
 # Fallback default syntax
 cache_ttl: "${cache.timeout:300}"
 
-# List indexing (bracket or dot notation)
+# List element indexing
 servers: ["alpha.local", "beta.local"]
 primary_server: "${servers[0]}"
-secondary_server: "${servers.1}"
 ```
 
-### Relative & Sibling Navigation (Dot Syntax)
-Refer to keys in the same object or parent objects without writing full paths:
+### Relative Navigation (Dot Syntax)
 ```yaml
 db:
   host: "db.internal"
-  port: 5432
   staging:
     port: 5433
-    # '.port' resolves to sibling (5433)
-    # '..host' resolves to parent db.host ("db.internal")
+    # '.port' resolves to sibling (5433); '..host' resolves to parent db.host
     connection: "Server=${..host};Port=${.port}"
 ```
 
-### Literal Escaping (`\${...}`)
-Escape interpolations so they aren't evaluated (e.g. for shell scripts, regex, or templates):
+### Resolvers
 ```yaml
-command: "echo \\${HOME} on port ${server.port}"  # Resolves to: "echo ${HOME} on port 8080"
-```
-
-### Expression & Math Evaluation (`${eval:...}`)
-Perform arithmetic, logic, and comparisons inside configs:
-```yaml
-batch_size: 32
-num_gpus: 4
-total_batch: "${eval: ${batch_size} * ${num_gpus}}"  # Resolves to 128
-timeout_calc: "${eval: 10 + 5 * 2}"                 # Resolves to 20
-```
-
-### Environment Variables, `oc.*` Built-In Resolvers & Custom Resolvers
-```yaml
-# Environment variable with fallback (${env:...} or ${oc.env:...})
+# Environment variables
 database_url: "${env:DATABASE_URL, postgresql://localhost:5432/dev}"
 
-# Safe path selection with optional fallback (returns null if missing and no fallback)
+# Math & boolean evaluation
+total_batch: "${eval: ${batch_size} * ${num_gpus}}"
+
+# Safe path selection & string decoding
 optional_port: "${oc.select:db.port, 5432}"
-
-# Decode string (e.g. from env var) into native int, bool, list, or object
 decoded_port: "${oc.decode:${oc.env:PORT_STR, 8080}}"
-decoded_list: "${oc.decode:[10, 20, 30]}"
-
-# Extract dictionary keys as a list & format current timestamp
-db_keys: "${oc.dict.keys:db}"
-run_dir: "outputs/${now:yyyy-MM-dd}/${now:HH-mm-ss}"
-
-# Custom registered resolver
-log_dir: "/var/log/apps/${slugify:${app_name}}"
+run_dir: "outputs/${now:yyyy-MM-dd}"
 ```
 
-Register custom resolvers in C#:
+Custom resolver registration:
 ```csharp
 builder.RegisterResolver("slugify", raw => raw.ToLowerInvariant().Replace(' ', '-'));
 ```
 
 ---
 
-## 📦 Advanced Hydra & OmegaConf Features
+## Configuration Diffing & Serialization
 
-### 1. Package Directives (`@package`, `@_global_`, `@_group_`, `override`, and `# @package` Headers)
-Mount the same config group multiple times under different namespaces, override earlier defaults in-place, or merge a config group directly into the root:
-```yaml
-defaults:
-  - db@primary_db: postgres       # Mounts db/postgres.yaml under 'primary_db'
-  - db@_group_.replica: sqlite    # Expands _group_ -> db, mounting under 'db.replica'
-  - override db@primary_db: mysql # Replaces primary_db's selection in-place
-  - experiment@_global_: fast     # Merges experiment/fast.yaml directly into root
-  - _self_
-```
-You can also place `# @package _global_` (or `# @package custom.path`) at the top of a config file, compose across multiple directories with `.AddSearchPath("shared_configs")`, or override packages from the CLI (`+experiment@_global_=fast`).
-
-### 2. Rich Multi-Run Sweep Generators (`range`, `linspace`, `choice`, `glob`, `sort`, `shuffle`)
-Run hyperparameter or multi-environment sweeps using `-m` / `--multirun`:
-```bash
-dotnet run -- -m db=glob(*) workers=range(2,8,2) lr=linspace(0.01,0.1,5) seed=sort(30,10,20) tags=choice([a,b],[c,d])
-```
-
-### 3. Strict Struct Mode (`WithStructMode()`), `+key` / `++key`, CLI Grammar Functions & Deep Deletion (`~key.path`)
-Catch command-line typos before they silently create invalid keys, index or delete list items (`items[-1]=99`, `~items[0]=1`), escape `???` literals (`\???`), and use CLI grammar functions (`int()`, `float()`, `str()`, `bool()`, `sort()`, `extend_list()`):
 ```csharp
-var node = OmegaConfBuilder.Create()
-    .SetRoot("configs")
-    .AddSearchPath("shared_plugin_configs")
-    .WithStructMode()       // Throws ConfigStructException on undeclared keys
-    .WithReadOnly()         // Freezes resolved AST against post-build mutation
-    .WithOutputDirectory("outputs/${now:yyyy-MM-dd}") // Saves .omegaconf/config.yaml & overrides.yaml
-    .AddCliArgs(
-        "~db.secret_token",          // Deletes nested property
-        "~items[-1]=deprecated",     // Conditional value-checked deletion
-        "+db.pool_size=int(20)",     // Explicitly appends a new key with int() cast
-        "++db.port=5433",            // Safe upsert (overrides or creates)
-        "tags=extend_list(prod,gpu)" // Extends an existing list in-place
-    )
-    .BuildNode();
+using OmegaConf.NET.Diff;
+using OmegaConf.NET.Serialization;
+
+// Diff two configuration nodes
+ConfigDiff diff = ConfigDiffer.Compare(stagingNode, productionNode);
+Console.WriteLine(diff.ToString());
+
+// Export back to YAML, JSON, or TOML
+string yaml = productionNode.ToYaml();
+string json = productionNode.ToJson(indented: true);
+string toml = productionNode.ToToml();
 ```
-
-### 4. Programmatic `OmegaConfig` Facade & Recursive `_target_` / `_args_` / `_partial_` Instantiation
-```csharp
-// Merge inline or file-backed configs and safely query with Select<T>
-var merged = OmegaConfig.Merge(OmegaConfig.ParseYaml(yaml), OmegaConfig.ParseJson(json));
-int port = OmegaConfig.Select(merged, "db.port", 5432);
-
-// Dynamic instantiation with _target_, positional _args_, _recursive_: false, call-site overrides,
-// lazy Func<T> factories (_partial_), and optional ExecutionWhitelist security policies:
-var client = OmegaConfig.Instantiate<IEndpointClient>(
-    merged.SelectNode("client")!,
-    new { port = 9090 },
-    allowedTargets: ["MyApp.Plugins.*"]);
-var factory = OmegaConfig.Instantiate<Func<IEndpointClient>>(merged.SelectNode("client")!);
-```
-
-### 5. Interpolated Defaults, CLI Override Aliases, `ConfigStore`, Callbacks & CLI Inspection (`--cfg`, `--info`, `--help`)
-- **Interpolated Defaults List**: Reference properties, earlier group choices, or environment variables directly in `defaults:` (e.g. `- db: ${default_db}`, `- group1/group2/${group1}`, `- db: ${oc.env:DB_TYPE, postgres}`).
-- **CLI Override Aliases (`hydra.aliases` & `.AddAlias(...)`)**: Define short CLI flags or value shortcuts:
-  ```yaml
-  hydra:
-    aliases:
-      "batch_size, bs": trainer.batch_size
-      "verbose, v": verbose=true
-  ```
-- **In-Memory `ConfigStore` (`ConfigStore.Instance` & `.WithConfigStore(...)`)**: Register code-first C# POCOs, records, or `ConfigObjectNode` schemas in memory and compose them seamlessly with or without files on disk:
-  ```csharp
-  ConfigStore.Instance.Store(name: "postgres", node: typeof(DatabaseConfig), group: "db");
-  ```
-- **Lifecycle Callbacks (`IConfigCallback` / `ConfigCallback` & `hydra.callbacks`)**: Hook into `OnComposeConfig`, `OnRunStart`/`OnRunEnd`, `OnMultiRunStart`/`OnMultiRunEnd`, and `OnJobStart`/`OnJobEnd` via `builder.AddCallback(...)` or `hydra.callbacks` `_target_` declarations.
-- **CLI Inspection & Help (`builder.TryHandleCliInspection(out string output)`)**: Built-in support for `--cfg [all|job|hydra]`, `--info [all|defaults|aliases|searchpath]`, and `--help` / `-h`.
 
 ---
 
-## 🔌 Microsoft.Extensions.Configuration Integration
+## JSON Schema Generation
 
-Plug into ASP.NET Core `IConfiguration` and `WebApplicationBuilder`:
+Generate standard Draft-07 schemas for editor autocompletion:
+```csharp
+using OmegaConf.NET.Schema;
+
+JsonSchemaGenerator.GenerateSchemaFile<AppConfig>("configs/config.schema.json");
+```
+
+Add to `config.yaml` for IDE validation:
+```yaml
+# yaml-language-server: $schema=./config.schema.json
+app_name: "CatalogService"
+```
+
+---
+
+## Microsoft.Extensions.Configuration Integration
 
 ```csharp
 using OmegaConf.NET.Extensions;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Register OmegaConf.NET as configuration source
+// Register as IConfiguration provider
 builder.Configuration.AddOmegaConf(omega =>
 {
     omega.SetRoot("configs");
     omega.AddCliArgs(args);
 });
-
-// Access via standard IConfiguration
-string? dbHost = builder.Configuration["db:host"];
 
 // Or register strongly typed options in DI
 builder.Services.ConfigureOmegaConf<AppConfig>(omega =>
@@ -424,22 +304,14 @@ builder.Services.ConfigureOmegaConf<AppConfig>(omega =>
 
 ---
 
-## 🏃 Runnable Sample Projects
+## Sample Projects
 
-### 1. QuickStart Sample
-A complete, runnable console application demonstrating tree composition, auto-cascading, CLI overrides, diffing, and schema generation is available in [`samples/QuickStart`](samples/QuickStart).
-
-Run it with:
-```bash
-dotnet run --project samples/QuickStart/QuickStart.csproj
-```
-
-### 2. Official Hydra Examples Port (`samples/HydraExamples`)
-A complete C# port of the official Python Hydra example suite (34 runnable projects across `tutorials/basic`, `tutorials/structured_configs`, `instantiate`, `patterns`, and `advanced`) is available in [`samples/HydraExamples`](samples/HydraExamples), producing identical outputs to Python Hydra.
+- **QuickStart**: Minimal runnable console application in [`samples/QuickStart`](samples/QuickStart).
+- **HydraExamples**: Complete C# port of the official 34 Python Hydra examples in [`samples/HydraExamples`](samples/HydraExamples).
 
 ---
 
-## 🧪 Running Tests
+## Running Tests
 
 ```bash
 dotnet test -m:1
@@ -447,16 +319,13 @@ dotnet test -m:1
 
 ---
 
-## 🤖 AI Coding Assistants, Skills & Transparency
+## AI Agent Integration
 
-> **AI & Human Review Disclosure**: This project was developed with the assistance of AI coding models (including Google Gemini) and has been reviewed, tested, and verified by human maintainers.
-
-OmegaConf.NET also includes first-class support for AI agents and coding assistants:
-- [**AGENTS.md**](AGENTS.md): Repository architecture manual, build rules, and operating directives for AI agents.
-- [**SKILL.md**](skills/omegaconf-net/SKILL.md): Dedicated AI skill with prompt instructions, syntax tables, operator rules, and best practices for consuming OmegaConf.NET in any project.
+- [**AGENTS.md**](AGENTS.md): Architecture manual and multi-targeting directives for AI coding agents.
+- [**SKILL.md**](skills/omegaconf-net/SKILL.md): Authoritative agent skill guide with syntax tables, gotchas, and composition rules.
 
 ---
 
-## 📄 License & Contributing
+## License
 
-This project is open-source under the [MIT License](LICENSE). See [CHANGELOG.md](CHANGELOG.md) for release history and [CONTRIBUTING.md](CONTRIBUTING.md) for contributor guidelines. Contributions, issues, and pull requests are warmly welcome!
+This project is licensed under the [MIT License](LICENSE).
